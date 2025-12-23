@@ -1,0 +1,75 @@
+# Exnode Rate Exporter Configuration
+# ===================================
+# This file configures the rate exporter for exnode.ru exchangers.
+# All values can also be set via environment variables (uppercase with underscores).
+
+# Exchanger Configuration
+# -----------------------
+# List of exchangers to monitor. Each exchanger needs an ID and name.
+# You can also specify a custom URL if needed.
+exchangers:
+  - id: "exchanger1"
+    name: "Exchanger 1"
+    enabled: true
+    # url: "https://exnode.ru/exchanger/exchanger1"  # Optional custom URL
+
+  - id: "exchanger2"
+    name: "Exchanger 2"
+    enabled: true
+
+  - id: "exchanger3"
+    name: "Exchanger 3"
+    enabled: true
+
+# Exnode API Settings
+# -------------------
+exnode_base_url: "https://exnode.ru"
+exnode_api_endpoint: "/api/exchangers/{exchanger_id}/rates"
+exnode_directions_endpoint: "/api/exchangers/{exchanger_id}/directions"
+
+# Update Settings
+# ---------------
+# How often to fetch new rates (in seconds)
+update_interval_seconds: 30
+
+# Output Settings
+# ---------------
+# Path to the output XML file
+output_path: "./request-exportxml.xml"
+output_encoding: "utf-8"
+
+# HTTP Server (Optional)
+# ----------------------
+# Enable built-in HTTP server to serve the XML
+http_enabled: false
+http_host: "0.0.0.0"
+http_port: 8080
+
+# Default Field Values
+# --------------------
+# These values are used when the source data doesn't provide them
+defaults:
+  amount: "0"           # Reserve/available amount
+  min_amount: "0"       # Minimum exchange amount
+  max_amount: "999999999"  # Maximum exchange amount
+  param: "0"            # Exchange parameters/flags
+  in_amount: "1"        # Input amount (for rate normalization)
+
+# Network Settings
+# ----------------
+network:
+  timeout_seconds: 30       # HTTP request timeout
+  max_retries: 3            # Number of retry attempts
+  retry_base_delay: 1.0     # Base delay for exponential backoff
+  retry_max_delay: 30.0     # Maximum delay between retries
+  user_agent: "ExnodeRateExporter/1.0"
+
+# Logging
+# -------
+log_level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# XML Validation
+# --------------
+validate_xml: true
+# xsd_path: "./schema.xsd"  # Optional: path to XSD schema for validation
