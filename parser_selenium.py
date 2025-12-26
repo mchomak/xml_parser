@@ -1,16 +1,17 @@
 """
-Selenium-парсер курсов обмена криптовалют с exnode.ru
-Используется когда сайт рендерится через JavaScript
+Selenium parser for cryptocurrency exchange rates from exnode.ru
+Used when the site renders content via JavaScript
 """
 
+import os
 import re
 import logging
 import time
+from datetime import datetime
 from typing import Optional
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -21,23 +22,56 @@ from config import TOP_COUNT, build_exchange_url
 
 logger = logging.getLogger(__name__)
 
+# Directory for saving HTML files
+HTML_DUMP_DIR = "html_dumps"
+
+
+def ensure_html_dump_dir():
+    """Create HTML dump directory if not exists"""
+    if not os.path.exists(HTML_DUMP_DIR):
+        os.makedirs(HTML_DUMP_DIR)
+        logger.info(f"Created HTML dump directory: {HTML_DUMP_DIR}")
+
+
+def save_html_to_file(html: str, from_currency: str, to_currency: str) -> str:
+    """Save HTML content to file for debugging"""
+    ensure_html_dump_dir()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{HTML_DUMP_DIR}/{from_currency}_to_{to_currency}_{timestamp}.html"
+
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write(html)
+
+    logger.info(f"HTML saved to: {filename}")
+    return filename
+
 
 class SeleniumParser:
-    """Парсер с использованием Selenium для JavaScript-рендеринга"""
+    """Parser using Selenium for JavaScript-rendered pages"""
 
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = False):
+        """
+        Initialize parser.
+
+        Args:
+            headless: If True, run browser in headless mode. Default False (show browser).
+        """
         self.headless = headless
         self.driver: Optional[webdriver.Chrome] = None
 
     def _init_driver(self):
-        """Инициализировать WebDriver"""
+        """Initialize WebDriver"""
         if self.driver is not None:
             return
 
+        logger.info("Initializing Selenium WebDriver...")
         options = Options()
 
         if self.headless:
             options.add_argument("--headless=new")
+            logger.info("Running in HEADLESS mode")
+        else:
+            logger.info("Running in VISIBLE mode (browser will be displayed)")
 
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
@@ -49,23 +83,24 @@ class SeleniumParser:
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        # Отключаем логи
-        options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        # Disable automation flags
+        options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
+        options.add_experimental_option('useAutomationExtension', False)
 
         try:
             self.driver = webdriver.Chrome(options=options)
             self.driver.set_page_load_timeout(30)
-            logger.info("Selenium WebDriver инициализирован")
+            logger.info("Selenium WebDriver initialized successfully")
         except WebDriverException as e:
-            logger.error(f"Не удалось инициализировать WebDriver: {e}")
+            logger.error(f"Failed to initialize WebDriver: {e}")
             raise
 
     def close(self):
-        """Закрыть WebDriver"""
+        """Close WebDriver"""
         if self.driver:
             self.driver.quit()
             self.driver = None
-            logger.info("Selenium WebDriver закрыт")
+            logger.info("Selenium WebDriver closed")
 
     def __enter__(self):
         self._init_driver()
@@ -76,20 +111,32 @@ class SeleniumParser:
 
     def fetch_exchange_rates(self, from_currency: str, to_currency: str) -> list[ExchangeRate]:
         """
-        Получить курсы обмена с использованием Selenium.
+        Fetch exchange rates using Selenium.
+
+        Args:
+            from_currency: Source currency code (e.g., "SBERRUB")
+            to_currency: Target currency code (e.g., "BTC")
+
+        Returns:
+            List of top exchange rates
         """
         self._init_driver()
 
         url = build_exchange_url(from_currency, to_currency)
-        logger.info(f"[Selenium] Загружаем {from_currency} -> {to_currency}: {url}")
+
+        logger.info("=" * 70)
+        logger.info(f"FETCHING: {from_currency} -> {to_currency}")
+        logger.info(f"URL: {url}")
+        logger.info("=" * 70)
 
         try:
+            logger.info("Loading page...")
             self.driver.get(url)
 
-            # Ждём загрузки таблицы обменников
+            # Wait for table to load
             wait = WebDriverWait(self.driver, 15)
 
-            # Пробуем разные селекторы
+            # Try different selectors
             selectors = [
                 "[class*='Table_body__el__']",
                 "[class*='Table_body__amount']",
@@ -102,89 +149,141 @@ class SeleniumParser:
                 try:
                     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
                     table_loaded = True
-                    logger.debug(f"Таблица найдена по селектору: {selector}")
+                    logger.info(f"Table found with selector: {selector}")
                     break
                 except TimeoutException:
+                    logger.debug(f"Selector not found: {selector}")
                     continue
 
             if not table_loaded:
-                logger.warning("Таблица обменников не найдена. Пробуем парсить страницу как есть.")
+                logger.warning("Exchange table not found. Will try to parse page as-is.")
 
-            # Дополнительная пауза для полной загрузки
-            time.sleep(2)
+            # Additional wait for full page load
+            logger.info("Waiting 3 seconds for complete page render...")
+            time.sleep(3)
 
-            # Получаем HTML после рендеринга
+            # Get rendered HTML
             html = self.driver.page_source
+            logger.info(f"Page HTML length: {len(html)} characters")
 
+            # Save HTML to file
+            html_file = save_html_to_file(html, from_currency, to_currency)
+
+            # Parse the page
             rates = self._parse_page(html, from_currency, to_currency)
 
             if not rates:
-                logger.warning(f"Не найдено обменников для {from_currency} -> {to_currency}")
+                logger.warning(f"No exchangers found for {from_currency} -> {to_currency}")
+                logger.warning(f"Check saved HTML file: {html_file}")
                 return []
 
+            # Get top rates
             top_rates = get_top_rates(rates, TOP_COUNT)
-            logger.info(f"Топ-{len(top_rates)} обменников для {from_currency} -> {to_currency}")
+
+            logger.info("-" * 50)
+            logger.info(f"TOP {len(top_rates)} EXCHANGERS for {from_currency} -> {to_currency}:")
+            for i, r in enumerate(top_rates, 1):
+                logger.info(
+                    f"  {i}. {r.exchanger_name}: "
+                    f"give {r.give_amount:.4f} {from_currency}, "
+                    f"receive {r.receive_amount:.4f} {to_currency} | "
+                    f"1 {to_currency} = {r.inverse_rate:.4f} {from_currency}"
+                )
+            logger.info("-" * 50)
 
             return top_rates
 
         except TimeoutException:
-            logger.error(f"Таймаут загрузки страницы {url}")
+            logger.error(f"Page load timeout: {url}")
             return []
         except WebDriverException as e:
-            logger.error(f"Ошибка WebDriver: {e}")
+            logger.error(f"WebDriver error: {e}")
             return []
 
     def _parse_page(self, html: str, from_currency: str, to_currency: str) -> list[ExchangeRate]:
-        """Парсить HTML страницу после рендеринга JavaScript"""
+        """
+        Parse HTML page after JavaScript rendering.
+
+        Args:
+            html: Page HTML content
+            from_currency: Source currency
+            to_currency: Target currency
+
+        Returns:
+            List of parsed exchange rates
+        """
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, 'html.parser')
         rates = []
 
-        # Ищем строки таблицы
+        # Find all exchanger rows
         exchanger_rows = soup.find_all('div', class_=re.compile(r'Table_body__el__'))
 
-        logger.info(f"Найдено {len(exchanger_rows)} элементов обменников")
+        logger.info(f"Found {len(exchanger_rows)} exchanger row elements")
 
-        for row in exchanger_rows:
+        for idx, row in enumerate(exchanger_rows):
             try:
-                # Название обменника
+                # Get exchanger name
                 name_elem = row.find('p', class_=re.compile(r'Table_body__el__name'))
                 if not name_elem:
-                    # Попробуем найти по ID
+                    # Try getting name from ID attribute
                     name = row.get('id', '')
                 else:
                     name = name_elem.get_text(strip=True)
 
                 if not name:
+                    logger.debug(f"Row {idx}: No name found, skipping")
                     continue
 
-                # Суммы обмена
+                logger.debug(f"Row {idx}: Exchanger name = '{name}'")
+
+                # Find amount elements
                 amount_elems = row.find_all('div', class_=re.compile(r'Table_body__amount'))
 
+                logger.debug(f"Row {idx}: Found {len(amount_elems)} amount elements")
+
                 if len(amount_elems) < 2:
+                    logger.debug(f"Row {idx}: Not enough amount elements, skipping")
                     continue
 
-                # Парсим текст из первого <p> в каждом amount
+                # Parse amounts from <p> elements
                 give_p = amount_elems[0].find('p')
                 receive_p = amount_elems[1].find('p')
 
                 if not give_p or not receive_p:
+                    logger.debug(f"Row {idx}: Missing <p> elements in amounts")
                     continue
 
                 give_text = give_p.get_text()
                 receive_text = receive_p.get_text()
 
+                logger.debug(f"Row {idx}: give_text = '{give_text}'")
+                logger.debug(f"Row {idx}: receive_text = '{receive_text}'")
+
                 give_amount = parse_amount(give_text)
                 receive_amount = parse_amount(receive_text)
 
-                if give_amount is None or receive_amount is None or give_amount == 0:
+                logger.debug(f"Row {idx}: give_amount = {give_amount}, receive_amount = {receive_amount}")
+
+                if give_amount is None or receive_amount is None:
+                    logger.debug(f"Row {idx}: Could not parse amounts")
                     continue
 
-                # Курс: сколько получаешь за 1 единицу
-                rate = receive_amount / give_amount
+                if give_amount == 0:
+                    logger.debug(f"Row {idx}: give_amount is zero, skipping")
+                    continue
 
-                # Лимиты
+                # Log parsed values
+                logger.info(
+                    f"PARSED: {name} | "
+                    f"give={give_amount:.4f} {from_currency} | "
+                    f"receive={receive_amount:.4f} {to_currency} | "
+                    f"rate={receive_amount/give_amount:.10f} | "
+                    f"inverse={give_amount/receive_amount:.4f}"
+                )
+
+                # Parse limits
                 min_amount = None
                 max_amount = None
 
@@ -197,40 +296,51 @@ class SeleniumParser:
                         label_text = label.get_text(strip=True).lower()
                         value_amount = parse_amount(value.get_text())
 
-                        if 'от' in label_text:
+                        if 'from' in label_text or 'ot' in label_text or label_text == 'ot':
                             min_amount = value_amount
-                        elif 'до' in label_text:
+                        elif 'to' in label_text or 'do' in label_text or label_text == 'do':
                             max_amount = value_amount
+
+                logger.debug(f"Row {idx}: min_amount={min_amount}, max_amount={max_amount}")
 
                 exchange_rate = ExchangeRate(
                     exchanger_name=name,
                     from_currency=from_currency,
                     to_currency=to_currency,
-                    rate=rate,
+                    give_amount=give_amount,
+                    receive_amount=receive_amount,
                     min_amount=min_amount,
                     max_amount=max_amount,
-                    reserve=give_amount
                 )
 
                 rates.append(exchange_rate)
-                logger.debug(f"Обменник {name}: {rate:.8f}")
 
             except Exception as e:
-                logger.warning(f"Ошибка парсинга элемента: {e}")
+                logger.warning(f"Row {idx}: Parse error - {e}")
                 continue
 
+        logger.info(f"Successfully parsed {len(rates)} exchangers")
         return rates
 
 
 if __name__ == "__main__":
-    # Тестовый запуск
-    logging.basicConfig(level=logging.DEBUG)
+    # Test run
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
 
     from config import EXCHANGE_DIRECTIONS
 
-    with SeleniumParser(headless=True) as parser:
-        for from_curr, to_curr in EXCHANGE_DIRECTIONS[:2]:
+    # Run with visible browser for testing
+    with SeleniumParser(headless=False) as parser:
+        for from_curr, to_curr in EXCHANGE_DIRECTIONS[:1]:
             rates = parser.fetch_exchange_rates(from_curr, to_curr)
-            for rate in rates:
-                print(f"{rate.exchanger_name}: 1 {rate.from_currency} = {rate.rate:.8f} {rate.to_currency}")
+            print("\n" + "=" * 60)
+            print(f"RESULTS for {from_curr} -> {to_curr}:")
+            print("=" * 60)
+            for r in rates:
+                print(f"  {r.exchanger_name}:")
+                print(f"    give {r.give_amount:.4f} {r.from_currency}, receive {r.receive_amount:.4f} {r.to_currency}")
+                print(f"    1 {r.to_currency} = {r.inverse_rate:.4f} {r.from_currency}")
             print()
