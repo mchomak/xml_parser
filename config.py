@@ -28,22 +28,22 @@ HEADERS = {
 # Формат: "КОД_ВАЛЮТЫ": "url_slug"
 CRYPTO_CURRENCIES = {
     "BTC": "bitcoin_btc-btc",
-    "ETH": "ethereum_eth-eth",
-    "USDTTRC20": "tether_trc20-usdttrc20",
-    "USDTERC20": "tether_erc20-usdterc20",
-    "LTC": "litecoin_ltc-ltc",
-    "TON": "toncoin-ton",
+    # "ETH": "ethereum_eth-eth",
+    # "USDTTRC20": "tether_trc20-usdttrc20",
+    # "USDTERC20": "tether_erc20-usdterc20",
+    # "LTC": "litecoin_ltc-ltc",
+    # "TON": "toncoin-ton",
 }
 
 # Маппинг фиатных валют/платежных систем на URL-slugs
 FIAT_CURRENCIES = {
     "SBERRUB": "sberbank_sber-sberrub",
-    "TCSBRUB": "tinkoff_tcs-tcsbrub",
-    "VTBRUB": "vtb-vtbrub",
-    "ACRUB": "alfa_bank-acrub",
-    "QWRUB": "qiwi-qwrub",
-    "YAMRUB": "yoomoney_yandex-yamrub",
-    "CASHRUB": "nalichnye_rub-cashrub",
+    # "TCSBRUB": "tinkoff_tcs-tcsbrub",
+    # "VTBRUB": "vtb-vtbrub",
+    # "ACRUB": "alfa_bank-acrub",
+    # "QWRUB": "qiwi-qwrub",
+    # "YAMRUB": "yoomoney_yandex-yamrub",
+    # "CASHRUB": "nalichnye_rub-cashrub",
 }
 
 # Направления обмена для парсинга
@@ -51,33 +51,33 @@ FIAT_CURRENCIES = {
 # Будем парсить оба направления: крипта -> фиат и фиат -> крипта
 EXCHANGE_DIRECTIONS = [
     # USDT TRC20 <-> RUB банки
-    ("USDTTRC20", "SBERRUB"),
-    ("SBERRUB", "USDTTRC20"),
+    # ("USDTTRC20", "SBERRUB"),
+    # ("SBERRUB", "USDTTRC20"),
 
     # BTC <-> RUB
     ("BTC", "SBERRUB"),
-    ("CASHRUB", "BTC"),
+    # ("CASHRUB", "BTC"),
 
-    # ETH <-> RUB
-    ("ETH", "TCSBRUB"),
+    # # ETH <-> RUB
+    # ("ETH", "TCSBRUB"),
 
-    # USDT ERC20 <-> RUB
-    ("USDTERC20", "VTBRUB"),
+    # # USDT ERC20 <-> RUB
+    # ("USDTERC20", "VTBRUB"),
 
-    # LTC <-> RUB
-    ("LTC", "ACRUB"),
+    # # LTC <-> RUB
+    # ("LTC", "ACRUB"),
 
-    # QIWI -> USDT
-    ("QWRUB", "USDTTRC20"),
+    # # QIWI -> USDT
+    # ("QWRUB", "USDTTRC20"),
 
-    # YooMoney -> BTC
-    ("YAMRUB", "BTC"),
+    # # YooMoney -> BTC
+    # ("YAMRUB", "BTC"),
 
-    # Наличные -> USDT
-    ("CASHRUB", "USDTTRC20"),
+    # # Наличные -> USDT
+    # ("CASHRUB", "USDTTRC20"),
 
-    # TON <-> RUB
-    ("TON", "SBERRUB"),
+    # # TON <-> RUB
+    # ("TON", "SBERRUB"),
 ]
 
 # Значения по умолчанию для XML (можно настроить)
