@@ -8,6 +8,9 @@ env/
 venv/
 .venv/
 
+# Environment
+.env
+
 # Logs
 *.log
 parser.log
@@ -15,6 +18,8 @@ parser.log
 # Output files
 rates.xml
 test_rates.xml
+html_dumps/
+parsed_urls.txt
 
 # IDE
 .idea/

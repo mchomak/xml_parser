@@ -7,8 +7,9 @@ import os
 import re
 import logging
 import time
+import functools
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Callable, Any
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -16,36 +17,60 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.webdriver.common.keys import Keys
 
-from parser import ExchangeRate, parse_amount, get_top_rates
-from config import TOP_COUNT, build_exchange_url, CRYPTO_CURRENCIES, FIAT_CURRENCIES
+from parser import ExchangeRate, parse_amount, get_top_rates, is_buying_crypto
+from config import (
+    TOP_COUNT, build_exchange_url, CRYPTO_CURRENCIES, FIAT_CURRENCIES,
+    MAX_RETRIES, RETRY_DELAY, PAGE_TIMEOUT, ELEMENT_TIMEOUT, CALCULATOR_WAIT
+)
 
 logger = logging.getLogger(__name__)
 
-# Directory for saving HTML files
-HTML_DUMP_DIR = "html_dumps"
 # File for saving parsed URLs
 URLS_LOG_FILE = "parsed_urls.txt"
 
 
-def ensure_html_dump_dir():
-    """Create HTML dump directory if not exists"""
-    if not os.path.exists(HTML_DUMP_DIR):
-        os.makedirs(HTML_DUMP_DIR)
-        logger.info(f"Created HTML dump directory: {HTML_DUMP_DIR}")
+def retry_on_failure(max_retries: int = None, delay: float = None):
+    """
+    Decorator for retrying operations on failure.
 
+    Args:
+        max_retries: Maximum number of retry attempts (default from config)
+        delay: Base delay between retries in seconds (doubles on each retry)
+    """
+    if max_retries is None:
+        max_retries = MAX_RETRIES
+    if delay is None:
+        delay = RETRY_DELAY
 
-def save_html_to_file(html: str, from_currency: str, to_currency: str) -> str:
-    """Save HTML content to file for debugging"""
-    ensure_html_dump_dir()
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{HTML_DUMP_DIR}/{from_currency}_to_{to_currency}_{timestamp}.html"
+    def decorator(func: Callable) -> Callable:
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs) -> Any:
+            last_exception = None
+            current_delay = delay
 
-    with open(filename, 'w', encoding='utf-8') as f:
-        f.write(html)
+            for attempt in range(1, max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    last_exception = e
+                    if attempt < max_retries:
+                        logger.warning(
+                            f"{func.__name__}: Attempt {attempt}/{max_retries} failed: {e}. "
+                            f"Retrying in {current_delay}s..."
+                        )
+                        time.sleep(current_delay)
+                        current_delay *= 2  # Exponential backoff
+                    else:
+                        logger.error(
+                            f"{func.__name__}: All {max_retries} attempts failed. Last error: {e}"
+                        )
 
-    logger.info(f"HTML saved to: {filename}")
-    return filename
+            raise last_exception
+
+        return wrapper
+    return decorator
 
 
 def save_url_to_log(url: str, from_currency: str, to_currency: str):
@@ -56,30 +81,7 @@ def save_url_to_log(url: str, from_currency: str, to_currency: str):
     with open(URLS_LOG_FILE, 'a', encoding='utf-8') as f:
         f.write(log_line)
 
-    logger.info(f"URL saved to {URLS_LOG_FILE}")
-
-
-def is_buying_crypto(from_currency: str, to_currency: str) -> bool:
-    """
-    Determine if this is a crypto buying operation.
-
-    Buying crypto: FIAT -> CRYPTO (e.g., SBERRUB -> BTC)
-    Selling crypto: CRYPTO -> FIAT (e.g., BTC -> SBERRUB)
-
-    Returns True if buying crypto, False if selling.
-    """
-    from_is_crypto = from_currency in CRYPTO_CURRENCIES
-    to_is_crypto = to_currency in CRYPTO_CURRENCIES
-
-    # If from is fiat and to is crypto -> buying crypto
-    if not from_is_crypto and to_is_crypto:
-        return True
-    # If from is crypto and to is fiat -> selling crypto
-    elif from_is_crypto and not to_is_crypto:
-        return False
-    # Edge cases (crypto to crypto, fiat to fiat) - default to buying behavior
-    else:
-        return True
+    logger.debug(f"URL logged to {URLS_LOG_FILE}")
 
 
 class SeleniumParser:
@@ -95,8 +97,9 @@ class SeleniumParser:
         self.headless = headless
         self.driver: Optional[webdriver.Chrome] = None
 
+    @retry_on_failure()
     def _init_driver(self):
-        """Initialize WebDriver"""
+        """Initialize WebDriver with retry on failure"""
         if self.driver is not None:
             return
 
@@ -105,9 +108,9 @@ class SeleniumParser:
 
         if self.headless:
             options.add_argument("--headless=new")
-            logger.info("Running in HEADLESS mode")
+            logger.debug("Running in HEADLESS mode")
         else:
-            logger.info("Running in VISIBLE mode (browser will be displayed)")
+            logger.debug("Running in VISIBLE mode")
 
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
@@ -119,24 +122,19 @@ class SeleniumParser:
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
 
-        # Disable automation flags
         options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
         options.add_experimental_option('useAutomationExtension', False)
 
-        try:
-            self.driver = webdriver.Chrome(options=options)
-            self.driver.set_page_load_timeout(30)
-            logger.info("Selenium WebDriver initialized successfully")
-        except WebDriverException as e:
-            logger.error(f"Failed to initialize WebDriver: {e}")
-            raise
+        self.driver = webdriver.Chrome(options=options)
+        self.driver.set_page_load_timeout(PAGE_TIMEOUT)
+        logger.info("WebDriver initialized")
 
     def close(self):
         """Close WebDriver"""
         if self.driver:
             self.driver.quit()
             self.driver = None
-            logger.info("Selenium WebDriver closed")
+            logger.debug("WebDriver closed")
 
     def __enter__(self):
         self._init_driver()
@@ -145,246 +143,243 @@ class SeleniumParser:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-    def _click_sort_header(self, from_currency: str, to_currency: str):
+    def _click_sort_header(self, from_currency: str, to_currency: str) -> bool:
         """
         Click on the appropriate sorting header based on operation type.
-
-        When BUYING crypto (FIAT -> CRYPTO):
-            - Click "Отдаете" to sort by price ascending (cheapest first)
-        When SELLING crypto (CRYPTO -> FIAT):
-            - Click "Получаете" to sort by price descending (most expensive first)
+        Returns True if successful, False otherwise.
         """
         buying = is_buying_crypto(from_currency, to_currency)
+        header_text = "Отдаете" if buying else "Получаете"
+        sort_type = "ascending" if buying else "descending"
 
-        if buying:
-            # Buying crypto - sort by "Отдаете" (what you give) ascending
-            header_text = "Отдаете"
-            sort_type = "ascending (cheapest first)"
-        else:
-            # Selling crypto - sort by "Получаете" (what you receive) descending
-            header_text = "Получаете"
-            sort_type = "descending (most expensive first)"
-
-        logger.info(f"Operation: {'BUYING' if buying else 'SELLING'} crypto")
-        logger.info(f"Clicking on '{header_text}' header for {sort_type} sorting...")
+        logger.debug(f"{'BUYING' if buying else 'SELLING'} crypto, sorting by {header_text} ({sort_type})")
 
         try:
-            # Find the header element with the text
             header_xpath = f"//div[contains(@class, 'Table_header__el')]//p[text()='{header_text}']"
-
-            wait = WebDriverWait(self.driver, 10)
+            wait = WebDriverWait(self.driver, ELEMENT_TIMEOUT)
             header_elem = wait.until(EC.element_to_be_clickable((By.XPATH, header_xpath)))
 
-            # Click the header to sort
             header_elem.click()
-            logger.info(f"Clicked '{header_text}' header - first click")
             time.sleep(1)
 
-            # For buying (ascending) - we might need to click twice to get ascending order
-            # For selling (descending) - we might need to click twice to get descending order
-            # Check if the arrow indicates the right direction and click again if needed
-
             if buying:
-                # For buying, we want ascending (cheapest first)
-                # Click again to ensure ascending order
                 header_elem.click()
-                logger.info(f"Clicked '{header_text}' header - second click for ascending")
                 time.sleep(1)
-            else:
-                # For selling, first click usually gives descending (most expensive first)
-                # No additional click needed usually
-                pass
 
-            logger.info(f"Sorting applied: {header_text} - {sort_type}")
+            logger.debug(f"Sorting applied: {header_text}")
+            return True
 
         except TimeoutException:
-            logger.warning(f"Could not find '{header_text}' header for sorting. Continuing without sorting.")
+            logger.warning(f"Sort header '{header_text}' not found")
+            return False
         except Exception as e:
-            logger.warning(f"Error clicking sort header: {e}. Continuing without sorting.")
+            logger.warning(f"Error clicking sort header: {e}")
+            return False
+
+    def _set_calculator_input(self, from_currency: str, to_currency: str) -> bool:
+        """
+        Set calculator input field to 1 in the "expensive" currency field.
+        Returns True if successful, False otherwise.
+        """
+        buying = is_buying_crypto(from_currency, to_currency)
+        input_id = "toInput" if buying else "fromInput"
+        expensive_currency = to_currency if buying else from_currency
+
+        logger.debug(f"Setting 1 {expensive_currency} in #{input_id}")
+
+        try:
+            wait = WebDriverWait(self.driver, ELEMENT_TIMEOUT)
+            input_elem = wait.until(EC.presence_of_element_located((By.ID, input_id)))
+
+            input_elem.click()
+            time.sleep(0.3)
+            input_elem.send_keys(Keys.CONTROL + "a")
+            time.sleep(0.1)
+            input_elem.send_keys(Keys.DELETE)
+            time.sleep(0.1)
+            input_elem.send_keys("1")
+
+            time.sleep(CALCULATOR_WAIT)
+
+            other_input_id = "fromInput" if input_id == "toInput" else "toInput"
+            other_input = self.driver.find_element(By.ID, other_input_id)
+            calculated_value = other_input.get_attribute("value")
+
+            logger.debug(f"Calculator: 1 {expensive_currency} = {calculated_value}")
+            return True
+
+        except TimeoutException:
+            logger.warning(f"Calculator input #{input_id} not found")
+            return False
+        except Exception as e:
+            logger.warning(f"Error setting calculator input: {e}")
+            return False
+
+    def _load_page(self, url: str) -> bool:
+        """Load page with retry logic. Returns True if successful."""
+        try:
+            self.driver.get(url)
+
+            wait = WebDriverWait(self.driver, ELEMENT_TIMEOUT)
+            selectors = [
+                "[class*='Table_body__el__']",
+                "[class*='Table_body__amount']",
+                ".exchanger-row",
+            ]
+
+            for selector in selectors:
+                try:
+                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                    logger.debug(f"Table loaded (selector: {selector})")
+                    return True
+                except TimeoutException:
+                    continue
+
+            logger.warning("Table not found, will try to parse page as-is")
+            return True
+
+        except TimeoutException:
+            raise TimeoutException(f"Page load timeout: {url}")
+        except WebDriverException as e:
+            raise WebDriverException(f"WebDriver error: {e}")
 
     def fetch_exchange_rates(self, from_currency: str, to_currency: str) -> list[ExchangeRate]:
         """
-        Fetch exchange rates using Selenium.
+        Fetch exchange rates using Selenium with retry logic.
 
         Args:
             from_currency: Source currency code (e.g., "SBERRUB")
             to_currency: Target currency code (e.g., "BTC")
 
         Returns:
-            List of top exchange rates
+            List of top exchange rates, or empty list on failure
         """
         self._init_driver()
 
         url = build_exchange_url(from_currency, to_currency)
+        logger.info(f"Fetching: {from_currency} -> {to_currency}")
+        logger.debug(f"URL: {url}")
 
-        logger.info("=" * 70)
-        logger.info(f"FETCHING: {from_currency} -> {to_currency}")
-        logger.info(f"URL: {url}")
-        logger.info("=" * 70)
-
-        # Save URL to log file
         save_url_to_log(url, from_currency, to_currency)
 
-        try:
-            logger.info("Loading page...")
-            self.driver.get(url)
+        # Try to load page with retries
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                self._load_page(url)
+                break
+            except Exception as e:
+                if attempt < MAX_RETRIES:
+                    delay = RETRY_DELAY * (2 ** (attempt - 1))
+                    logger.warning(f"Page load attempt {attempt}/{MAX_RETRIES} failed: {e}. Retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    logger.error(f"Failed to load page after {MAX_RETRIES} attempts: {url}")
+                    return []
 
-            # Wait for table to load
-            wait = WebDriverWait(self.driver, 15)
+        # Set calculator input (with retry)
+        calculator_success = False
+        for attempt in range(1, MAX_RETRIES + 1):
+            if self._set_calculator_input(from_currency, to_currency):
+                calculator_success = True
+                break
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAY * (2 ** (attempt - 1))
+                logger.warning(f"Calculator input attempt {attempt}/{MAX_RETRIES} failed. Retrying in {delay}s...")
+                time.sleep(delay)
 
-            time.sleep(3)
-
-            # Try different selectors
-            selectors = [
-                "[class*='Table_body__el__']",
-                "[class*='Table_body__amount']",
-                ".exchanger-row",
-                "[data-exchanger]",
-            ]
-
-            table_loaded = False
-            for selector in selectors:
-                try:
-                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
-                    table_loaded = True
-                    logger.info(f"Table found with selector: {selector}")
-                    break
-                except TimeoutException:
-                    logger.debug(f"Selector not found: {selector}")
-                    continue
-
-            if not table_loaded:
-                logger.warning("Exchange table not found. Will try to parse page as-is.")
-
-            # Click on sorting header
-            self._click_sort_header(from_currency, to_currency)
-
-            # Additional wait for page to update after sorting
-            logger.info("Waiting 2 seconds for sorting to apply...")
-            time.sleep(2)
-
-            # Get rendered HTML
-            html = self.driver.page_source
-            logger.info(f"Page HTML length: {len(html)} characters")
-
-            # Save HTML to file
-            html_file = save_html_to_file(html, from_currency, to_currency)
-
-            # Parse the page
-            rates = self._parse_page(html, from_currency, to_currency)
-
-            if not rates:
-                logger.warning(f"No exchangers found for {from_currency} -> {to_currency}")
-                logger.warning(f"Check saved HTML file: {html_file}")
-                return []
-
-            # Get top rates
-            top_rates = get_top_rates(rates, TOP_COUNT)
-
-            logger.info("-" * 50)
-            logger.info(f"TOP {len(top_rates)} EXCHANGERS for {from_currency} -> {to_currency}:")
-            for i, r in enumerate(top_rates, 1):
-                logger.info(
-                    f"  {i}. {r.exchanger_name}: "
-                    f"give {r.give_amount:.4f} {from_currency}, "
-                    f"receive {r.receive_amount:.4f} {to_currency} | "
-                    f"rate={r.rate:.8f}"
-                )
-            logger.info("-" * 50)
-
-            return top_rates
-
-        except TimeoutException:
-            logger.error(f"Page load timeout: {url}")
+        if not calculator_success:
+            logger.error(f"Failed to set calculator input after {MAX_RETRIES} attempts")
             return []
-        except WebDriverException as e:
-            logger.error(f"WebDriver error: {e}")
+
+        time.sleep(1)
+
+        # Collect prices BEFORE sorting
+        logger.debug("Collecting prices before sorting...")
+        html_before = self.driver.page_source
+        rates_before = self._parse_page(html_before, from_currency, to_currency)
+
+        # Click sorting header (with retry)
+        for attempt in range(1, MAX_RETRIES + 1):
+            if self._click_sort_header(from_currency, to_currency):
+                break
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAY * (2 ** (attempt - 1))
+                logger.warning(f"Sort header click attempt {attempt}/{MAX_RETRIES} failed. Retrying in {delay}s...")
+                time.sleep(delay)
+
+        time.sleep(2)
+
+        # Collect prices AFTER sorting
+        logger.debug("Collecting prices after sorting...")
+        html_after = self.driver.page_source
+        rates_after = self._parse_page(html_after, from_currency, to_currency)
+
+        # Merge rates from before and after
+        all_rates_dict = {}
+        for r in rates_before + rates_after:
+            if r.exchanger_name not in all_rates_dict:
+                all_rates_dict[r.exchanger_name] = r
+
+        rates = list(all_rates_dict.values())
+
+        if not rates:
+            logger.error(f"No exchangers found for {from_currency} -> {to_currency}")
             return []
+
+        # Get top rates (sorted by price)
+        buying = is_buying_crypto(from_currency, to_currency)
+        top_rates = get_top_rates(rates, TOP_COUNT, buying)
+
+        logger.info(f"Found {len(top_rates)} top exchangers for {from_currency} -> {to_currency}")
+        for i, r in enumerate(top_rates, 1):
+            logger.info(f"  {i}. {r.exchanger_name}: price={r.price:.2f} RUB")
+
+        return top_rates
 
     def _parse_page(self, html: str, from_currency: str, to_currency: str) -> list[ExchangeRate]:
-        """
-        Parse HTML page after JavaScript rendering.
-
-        Args:
-            html: Page HTML content
-            from_currency: Source currency
-            to_currency: Target currency
-
-        Returns:
-            List of parsed exchange rates
-        """
+        """Parse HTML page after JavaScript rendering."""
         from bs4 import BeautifulSoup
 
         soup = BeautifulSoup(html, 'html.parser')
         rates = []
 
-        # Find all exchanger rows
         exchanger_rows = soup.find_all('div', class_=re.compile(r'Table_body__el__'))
-
-        logger.info(f"Found {len(exchanger_rows)} exchanger row elements")
+        logger.debug(f"Found {len(exchanger_rows)} exchanger rows")
 
         for idx, row in enumerate(exchanger_rows):
             try:
                 # Get exchanger name
                 name_elem = row.find('p', class_=re.compile(r'Table_body__el__name'))
-                if not name_elem:
-                    # Try getting name from ID attribute
-                    name = row.get('id', '')
-                else:
-                    name = name_elem.get_text(strip=True)
+                name = name_elem.get_text(strip=True) if name_elem else row.get('id', '')
 
                 if not name:
-                    logger.debug(f"Row {idx}: No name found, skipping")
                     continue
-
-                logger.debug(f"Row {idx}: Exchanger name = '{name}'")
 
                 # Find amount elements
                 amount_elems = row.find_all('div', class_=re.compile(r'Table_body__amount'))
-
-                logger.debug(f"Row {idx}: Found {len(amount_elems)} amount elements")
-
                 if len(amount_elems) < 2:
-                    logger.debug(f"Row {idx}: Not enough amount elements, skipping")
                     continue
 
-                # Parse amounts from <p> elements
                 give_p = amount_elems[0].find('p')
                 receive_p = amount_elems[1].find('p')
 
                 if not give_p or not receive_p:
-                    logger.debug(f"Row {idx}: Missing <p> elements in amounts")
                     continue
 
-                give_text = give_p.get_text()
-                receive_text = receive_p.get_text()
+                give_amount = parse_amount(give_p.get_text())
+                receive_amount = parse_amount(receive_p.get_text())
 
-                logger.debug(f"Row {idx}: give_text = '{give_text}'")
-                logger.debug(f"Row {idx}: receive_text = '{receive_text}'")
-
-                give_amount = parse_amount(give_text)
-                receive_amount = parse_amount(receive_text)
-
-                logger.debug(f"Row {idx}: give_amount = {give_amount}, receive_amount = {receive_amount}")
-
-                if give_amount is None or receive_amount is None:
-                    logger.debug(f"Row {idx}: Could not parse amounts")
+                if give_amount is None or receive_amount is None or give_amount == 0:
                     continue
 
-                if give_amount == 0:
-                    logger.debug(f"Row {idx}: give_amount is zero, skipping")
-                    continue
+                # Calculate price
+                buying = is_buying_crypto(from_currency, to_currency)
+                if buying:
+                    price = give_amount / receive_amount if receive_amount != 0 else 0
+                else:
+                    price = receive_amount / give_amount if give_amount != 0 else 0
 
-                # Calculate rate
-                rate = receive_amount / give_amount
-
-                # Log parsed values
-                logger.info(
-                    f"PARSED: {name} | "
-                    f"give={give_amount:.4f} {from_currency} | "
-                    f"receive={receive_amount:.4f} {to_currency} | "
-                    f"rate={rate:.8f}"
-                )
+                logger.debug(f"Parsed: {name} | price={price:.2f} RUB")
 
                 # Parse limits
                 min_amount = None
@@ -399,12 +394,10 @@ class SeleniumParser:
                         label_text = label.get_text(strip=True).lower()
                         value_amount = parse_amount(value.get_text())
 
-                        if 'from' in label_text or 'ot' in label_text or label_text == 'ot':
+                        if label_text in ['от', 'ot', 'from', 'min']:
                             min_amount = value_amount
-                        elif 'to' in label_text or 'do' in label_text or label_text == 'do':
+                        elif label_text in ['до', 'do', 'to', 'max']:
                             max_amount = value_amount
-
-                logger.debug(f"Row {idx}: min_amount={min_amount}, max_amount={max_amount}")
 
                 exchange_rate = ExchangeRate(
                     exchanger_name=name,
@@ -412,6 +405,7 @@ class SeleniumParser:
                     to_currency=to_currency,
                     give_amount=give_amount,
                     receive_amount=receive_amount,
+                    price=price,
                     min_amount=min_amount,
                     max_amount=max_amount,
                 )
@@ -419,15 +413,14 @@ class SeleniumParser:
                 rates.append(exchange_rate)
 
             except Exception as e:
-                logger.warning(f"Row {idx}: Parse error - {e}")
+                logger.debug(f"Row {idx}: Parse error - {e}")
                 continue
 
-        logger.info(f"Successfully parsed {len(rates)} exchangers")
+        logger.debug(f"Parsed {len(rates)} exchangers")
         return rates
 
 
 if __name__ == "__main__":
-    # Test run
     logging.basicConfig(
         level=logging.DEBUG,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -435,15 +428,9 @@ if __name__ == "__main__":
 
     from config import EXCHANGE_DIRECTIONS
 
-    # Run with visible browser for testing
     with SeleniumParser(headless=False) as parser:
         for from_curr, to_curr in EXCHANGE_DIRECTIONS[:1]:
             rates = parser.fetch_exchange_rates(from_curr, to_curr)
-            print("\n" + "=" * 60)
-            print(f"RESULTS for {from_curr} -> {to_curr}:")
-            print("=" * 60)
+            print(f"\nRESULTS for {from_curr} -> {to_curr}:")
             for r in rates:
-                print(f"  {r.exchanger_name}:")
-                print(f"    give {r.give_amount:.4f} {r.from_currency}, receive {r.receive_amount:.4f} {r.to_currency}")
-                print(f"    rate = {r.rate:.8f}")
-            print()
+                print(f"  {r.exchanger_name}: price={r.price:.2f} RUB")

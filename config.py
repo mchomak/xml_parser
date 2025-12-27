@@ -1,20 +1,79 @@
 """
-Конфигурация парсера курсов криптовалют exnode.ru
+Configuration for cryptocurrency exchange rate parser (exnode.ru)
 """
 
-# Интервал обновления курсов в секундах
-UPDATE_INTERVAL = 30
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-# Сколько топ-обменников брать для каждого направления
-TOP_COUNT = 3
+# Load .env file
+env_path = Path(__file__).parent / '.env'
+load_dotenv(env_path)
 
-# Путь к выходному XML файлу
-OUTPUT_XML_PATH = "rates.xml"
 
-# Базовый URL сайта
+def get_env_int(key: str, default: int) -> int:
+    """Get integer value from environment"""
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def get_env_float(key: str, default: float) -> float:
+    """Get float value from environment"""
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def get_env_bool(key: str, default: bool) -> bool:
+    """Get boolean value from environment"""
+    value = os.getenv(key)
+    if value is None:
+        return default
+    return value.lower() in ('true', '1', 'yes', 'on')
+
+
+ONCE = get_env_bool('ONCE', False)
+
+SELENIUM = get_env_int('SELENIUM', True)
+
+# Update interval in seconds
+UPDATE_INTERVAL = get_env_int('UPDATE_INTERVAL', 30)
+
+# Number of top exchangers per direction
+TOP_COUNT = get_env_int('TOP_COUNT', 3)
+
+# Output XML file path
+OUTPUT_XML_PATH = os.getenv('OUTPUT_XML_PATH', 'rates.xml')
+
+# Retry settings
+MAX_RETRIES = get_env_int('MAX_RETRIES', 3)
+RETRY_DELAY = get_env_float('RETRY_DELAY', 2.0)
+
+# Browser settings
+HEADLESS = get_env_bool('HEADLESS', False)
+
+# Logging settings
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+LOG_FILE = os.getenv('LOG_FILE', 'parser.log')
+
+# Timeouts
+PAGE_TIMEOUT = get_env_int('PAGE_TIMEOUT', 30)
+ELEMENT_TIMEOUT = get_env_int('ELEMENT_TIMEOUT', 15)
+CALCULATOR_WAIT = get_env_float('CALCULATOR_WAIT', 1.5)
+
+# Base URL
 BASE_URL = "https://exnode.ru/exchange"
 
-# Заголовки для запросов (эмуляция браузера)
+# Request headers (browser emulation)
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",

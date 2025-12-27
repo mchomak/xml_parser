@@ -14,34 +14,54 @@ Usage:
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import time
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Optional
 
 from config import (
     UPDATE_INTERVAL,
     EXCHANGE_DIRECTIONS,
     OUTPUT_XML_PATH,
+    HEADLESS,
+    LOG_LEVEL,
+    LOG_FILE,
+    MAX_RETRIES,
+    SELENIUM,
+    ONCE,
 )
 from parser import ExchangeRate, fetch_exchange_rates
 from xml_generator import generate_xml, aggregate_rates_for_xml
 
-# Logging configuration
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('parser.log', encoding='utf-8')
-    ]
-)
+
+def setup_logging(level: str = None, log_file: str = None):
+    """Setup logging configuration"""
+    if level is None:
+        level = LOG_LEVEL
+    if log_file is None:
+        log_file = LOG_FILE
+
+    log_level = getattr(logging, level.upper(), logging.INFO)
+
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(log_file, encoding='utf-8')
+        ]
+    )
+
 
 logger = logging.getLogger(__name__)
 
 # Flag for graceful shutdown
 running = True
+
+# Store previous rates for fallback on errors
+previous_rates: Optional[dict[tuple[str, str], list[ExchangeRate]]] = None
 
 
 def signal_handler(signum, frame):
@@ -61,80 +81,86 @@ def collect_all_rates(fetch_func: Callable) -> dict[tuple[str, str], list[Exchan
     Returns:
         Dictionary {(from, to): [rates]}
     """
+    global previous_rates
     all_rates = {}
+    failed_directions = []
 
     for from_currency, to_currency in EXCHANGE_DIRECTIONS:
         try:
-            logger.info(f"Fetching rates for: {from_currency} -> {to_currency}")
             rates = fetch_func(from_currency, to_currency)
             all_rates[(from_currency, to_currency)] = rates
 
             if rates:
-                logger.info(
-                    f"SUCCESS: {from_currency} -> {to_currency}: "
-                    f"{len(rates)} exchangers, best rate: {rates[0].rate:.8f}"
-                )
+                logger.info(f"OK: {from_currency} -> {to_currency}: {len(rates)} exchangers")
             else:
-                logger.warning(f"FAILED: {from_currency} -> {to_currency}: no data")
+                logger.warning(f"EMPTY: {from_currency} -> {to_currency}: no data")
+                failed_directions.append((from_currency, to_currency))
 
         except Exception as e:
-            logger.error(f"ERROR parsing {from_currency} -> {to_currency}: {e}")
+            logger.error(f"ERROR: {from_currency} -> {to_currency}: {e}")
             all_rates[(from_currency, to_currency)] = []
+            failed_directions.append((from_currency, to_currency))
+
+    # Use previous rates for failed directions
+    if previous_rates and failed_directions:
+        for direction in failed_directions:
+            if direction in previous_rates and previous_rates[direction]:
+                logger.warning(f"Using previous data for {direction[0]} -> {direction[1]}")
+                all_rates[direction] = previous_rates[direction]
+
+    # Store successful rates for future fallback
+    if all_rates:
+        previous_rates = all_rates.copy()
 
     return all_rates
 
 
 def update_rates_requests():
     """Update rates using requests + BeautifulSoup"""
-    logger.info("=" * 70)
-    logger.info(f"STARTING RATE UPDATE ({datetime.now().isoformat()})")
+    logger.info(f"Starting update ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
     logger.info("Mode: requests + BeautifulSoup")
-    logger.info("=" * 70)
 
     all_rates = collect_all_rates(fetch_exchange_rates)
-
-    # Aggregate rates for XML
     aggregated_rates = aggregate_rates_for_xml(all_rates)
 
     if aggregated_rates:
         generate_xml(aggregated_rates, OUTPUT_XML_PATH)
-        logger.info(f"XML file updated: {OUTPUT_XML_PATH}")
+        logger.info(f"XML updated: {OUTPUT_XML_PATH}")
     else:
-        logger.error("Failed to get rates. XML file not updated.")
+        logger.error("No rates available. XML not updated.")
 
 
-def update_rates_selenium(headless: bool = False):
+def update_rates_selenium(headless: bool = None):
     """
     Update rates using Selenium.
 
     Args:
         headless: If True, run browser in headless mode
     """
+    if headless is None:
+        headless = HEADLESS
+
     try:
         from parser_selenium import SeleniumParser
     except ImportError:
-        logger.error("Selenium not installed. Install with: pip install selenium")
+        logger.error("Selenium not installed. Run: pip install selenium")
         return
 
-    logger.info("=" * 70)
-    logger.info(f"STARTING RATE UPDATE ({datetime.now().isoformat()})")
-    logger.info(f"Mode: Selenium ({'headless' if headless else 'visible browser'})")
-    logger.info("=" * 70)
+    logger.info(f"Starting update ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
+    logger.info(f"Mode: Selenium ({'headless' if headless else 'visible'})")
 
     with SeleniumParser(headless=headless) as parser:
         all_rates = collect_all_rates(parser.fetch_exchange_rates)
-
-        # Aggregate rates for XML
         aggregated_rates = aggregate_rates_for_xml(all_rates)
 
         if aggregated_rates:
             generate_xml(aggregated_rates, OUTPUT_XML_PATH)
-            logger.info(f"XML file updated: {OUTPUT_XML_PATH}")
+            logger.info(f"XML updated: {OUTPUT_XML_PATH}")
         else:
-            logger.error("Failed to get rates. XML file not updated.")
+            logger.error("No rates available. XML not updated.")
 
 
-def run_loop(update_func: Callable, interval: int = UPDATE_INTERVAL):
+def run_loop(update_func: Callable, interval: int = None):
     """
     Run infinite update loop.
 
@@ -144,16 +170,19 @@ def run_loop(update_func: Callable, interval: int = UPDATE_INTERVAL):
     """
     global running
 
-    # Register signal handlers
+    if interval is None:
+        interval = UPDATE_INTERVAL
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    logger.info("=" * 70)
+    logger.info("=" * 60)
     logger.info("CRYPTOCURRENCY RATE PARSER STARTED")
-    logger.info(f"Update interval: {interval} seconds")
+    logger.info(f"Update interval: {interval}s")
     logger.info(f"Output file: {OUTPUT_XML_PATH}")
-    logger.info(f"Exchange directions: {len(EXCHANGE_DIRECTIONS)}")
-    logger.info("=" * 70)
+    logger.info(f"Directions: {len(EXCHANGE_DIRECTIONS)}")
+    logger.info(f"Max retries: {MAX_RETRIES}")
+    logger.info("=" * 60)
 
     update_count = 0
 
@@ -161,13 +190,11 @@ def run_loop(update_func: Callable, interval: int = UPDATE_INTERVAL):
         try:
             update_func()
             update_count += 1
-            logger.info(f"Update #{update_count} completed. Next update in {interval} seconds.")
-            logger.info("-" * 70)
+            logger.info(f"Update #{update_count} complete. Next in {interval}s")
 
         except Exception as e:
-            logger.exception(f"Critical error during update: {e}")
+            logger.exception(f"Critical error: {e}")
 
-        # Wait with stop flag check
         for _ in range(interval):
             if not running:
                 break
@@ -177,32 +204,24 @@ def run_loop(update_func: Callable, interval: int = UPDATE_INTERVAL):
 
 
 def main():
-    import config
+    # Setup logging
+    setup_logging(level=LOG_LEVEL)
 
-    debug = True
-    config.OUTPUT_XML_PATH = "rates2.xml"
-    selenium = True
-    once = True
-    headless = False
-
-
-    if debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-    
-
-    if selenium:
-        # Create a wrapper with headless parameter
+    # Select update function
+    if SELENIUM:
         def selenium_updater():
-            update_rates_selenium(headless=headless)
+            update_rates_selenium(headless=HEADLESS)
         update_func = selenium_updater
     else:
         update_func = update_rates_requests
 
-    if once:
-        logger.info("4=>:@0B=K9 70?CA:")
+    # Run
+    if ONCE:
+        logger.info("Single run mode")
         update_func()
     else:
         run_loop(update_func, UPDATE_INTERVAL)
+
 
 if __name__ == "__main__":
     main()

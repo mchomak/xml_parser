@@ -7,7 +7,7 @@ from datetime import datetime
 from xml.dom.minidom import Document
 from typing import Optional
 
-from parser import ExchangeRate
+from parser import ExchangeRate, is_buying_crypto
 from config import DEFAULT_VALUES, OUTPUT_XML_PATH
 
 logger = logging.getLogger(__name__)
@@ -55,31 +55,45 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
         to_elem.appendChild(doc.createTextNode(rate.to_currency))
         item.appendChild(to_elem)
 
-        # in - always 1
+        # Determine in/out values based on buying/selling
+        # We always input 1 into the expensive currency (crypto) field
+        buying = is_buying_crypto(rate.from_currency, rate.to_currency)
+
+        if buying:
+            # Buying crypto (FIAT -> CRYPTO): we input 1 in toInput
+            # give_amount = how much fiat for 1 crypto
+            # receive_amount = 1 crypto
+            in_value = rate.give_amount  # fiat amount for 1 crypto
+            out_value = 1.0  # 1 crypto
+        else:
+            # Selling crypto (CRYPTO -> FIAT): we input 1 in fromInput
+            # give_amount = 1 crypto
+            # receive_amount = how much fiat for 1 crypto
+            in_value = 1.0  # 1 crypto
+            out_value = rate.receive_amount  # fiat amount for 1 crypto
+
+        # in - normalized input
         in_elem = doc.createElement("in")
-        in_elem.appendChild(doc.createTextNode("1"))
+        in_elem.appendChild(doc.createTextNode(format_rate(in_value)))
         item.appendChild(in_elem)
 
-        # out - rate (how much you receive for 1 unit of from_currency)
-        # rate = receive_amount / give_amount
-        out_value = rate.rate
+        # out - calculated output
         out_elem = doc.createElement("out")
         out_elem.appendChild(doc.createTextNode(format_rate(out_value)))
         item.appendChild(out_elem)
 
-        # amount - reserve
-        amount_value = rate.give_amount if rate.give_amount else DEFAULT_VALUES["amount"]
+        amount_value = max(in_value, out_value)
         amount_elem = doc.createElement("amount")
-        amount_elem.appendChild(doc.createTextNode(str(int(amount_value))))
+        amount_elem.appendChild(doc.createTextNode(str(amount_value)))
         item.appendChild(amount_elem)
 
-        # minamount - minimum amount
+        # minamount - minimum amount from parsed limits
         minamount_value = rate.min_amount if rate.min_amount else DEFAULT_VALUES["minamount"]
         minamount_elem = doc.createElement("minamount")
         minamount_elem.appendChild(doc.createTextNode(str(int(minamount_value))))
         item.appendChild(minamount_elem)
 
-        # maxamount - maximum amount
+        # maxamount - maximum amount from parsed limits
         maxamount_value = rate.max_amount if rate.max_amount else DEFAULT_VALUES["maxamount"]
         maxamount_elem = doc.createElement("maxamount")
         maxamount_elem.appendChild(doc.createTextNode(str(int(maxamount_value))))
@@ -95,7 +109,8 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
         # Log what we're writing
         logger.info(
             f"XML: {rate.from_currency} -> {rate.to_currency}: "
-            f"in=1, out={format_rate(out_value)} (exchanger: {rate.exchanger_name})"
+            f"in={format_rate(in_value)}, out={format_rate(out_value)}, "
+            f"amount={int(amount_value)} (exchanger: {rate.exchanger_name})"
         )
 
     # Generate pretty XML
@@ -151,7 +166,7 @@ def aggregate_rates_for_xml(all_rates: dict[tuple[str, str], list[ExchangeRate]]
             f"Selected for XML: {from_curr} -> {to_curr}: "
             f"{target_rate.exchanger_name} | "
             f"give={target_rate.give_amount:.4f}, receive={target_rate.receive_amount:.4f} | "
-            f"rate={target_rate.rate:.8f}"
+            f"price={target_rate.price:.2f} RUB"
         )
 
     return result
@@ -169,6 +184,7 @@ if __name__ == "__main__":
             to_currency="SBERRUB",
             give_amount=1.0,
             receive_amount=94.5,
+            price=94.5,  # RUB per 1 USDT
             min_amount=100,
             max_amount=500000,
         ),
@@ -178,6 +194,7 @@ if __name__ == "__main__":
             to_currency="BTC",
             give_amount=7053614.9476,
             receive_amount=1.0,
+            price=7053614.9476,  # RUB per 1 BTC
             min_amount=1000,
             max_amount=100000000,
         ),
