@@ -136,11 +136,7 @@ def parser_loop():
         except Exception as e:
             logger.exception(f"Parser loop error: {e}")
 
-        # Wait for next update
-        for _ in range(UPDATE_INTERVAL):
-            if not parser_running:
-                break
-            time.sleep(1)
+        time.sleep(UPDATE_INTERVAL)
 
     logger.info("Parser thread stopped")
 
