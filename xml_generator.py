@@ -21,20 +21,15 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
     <?xml version="1.0" ?>
     <rates generated="2025-12-23T18:11:17.800047" count="10">
       <item>
-        <from>BTC</from>
+        <from>USDTTRC20</from>
         <to>SBERRUB</to>
         <in>1</in>
-        <out>7053614</out>
-        <amount>1000000</amount>
-        <minamount>100</minamount>
-        <maxamount>500000</maxamount>
-        <param>0</param>
+        <out>94.5</out>
+        ...
       </item>
-      ...
     </rates>
 
-    Note: We invert the direction so that crypto is "from" and fiat is "to".
-    This gives us rates like "1 BTC = 7053614 RUB" which is more readable.
+    Direction matches config: from=from_currency, to=to_currency
     """
     if output_path is None:
         output_path = OUTPUT_XML_PATH
@@ -50,19 +45,14 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
     for rate in rates:
         item = doc.createElement("item")
 
-        # INVERTED DIRECTION:
-        # Original: from_currency (RUB) -> to_currency (BTC)
-        # XML: from (BTC) -> to (RUB)
-        # This makes the rate human-readable: 1 BTC = X RUB
-
-        # from - what you exchange (crypto)
+        # from - source currency (as in config)
         from_elem = doc.createElement("from")
-        from_elem.appendChild(doc.createTextNode(rate.to_currency))
+        from_elem.appendChild(doc.createTextNode(rate.from_currency))
         item.appendChild(from_elem)
 
-        # to - what you receive (fiat)
+        # to - target currency (as in config)
         to_elem = doc.createElement("to")
-        to_elem.appendChild(doc.createTextNode(rate.from_currency))
+        to_elem.appendChild(doc.createTextNode(rate.to_currency))
         item.appendChild(to_elem)
 
         # in - always 1
@@ -70,14 +60,14 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
         in_elem.appendChild(doc.createTextNode("1"))
         item.appendChild(in_elem)
 
-        # out - inverse rate (how much fiat for 1 crypto)
-        # inverse_rate = give_amount / receive_amount
-        out_value = rate.inverse_rate
+        # out - rate (how much you receive for 1 unit of from_currency)
+        # rate = receive_amount / give_amount
+        out_value = rate.rate
         out_elem = doc.createElement("out")
         out_elem.appendChild(doc.createTextNode(format_rate(out_value)))
         item.appendChild(out_elem)
 
-        # amount - reserve (give_amount as it represents exchanger's capacity)
+        # amount - reserve
         amount_value = rate.give_amount if rate.give_amount else DEFAULT_VALUES["amount"]
         amount_elem = doc.createElement("amount")
         amount_elem.appendChild(doc.createTextNode(str(int(amount_value))))
@@ -104,8 +94,8 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
 
         # Log what we're writing
         logger.info(
-            f"XML: {rate.to_currency} -> {rate.from_currency}: "
-            f"in=1, out={format_rate(out_value)} (from exchanger: {rate.exchanger_name})"
+            f"XML: {rate.from_currency} -> {rate.to_currency}: "
+            f"in=1, out={format_rate(out_value)} (exchanger: {rate.exchanger_name})"
         )
 
     # Generate pretty XML
@@ -150,7 +140,6 @@ def aggregate_rates_for_xml(all_rates: dict[tuple[str, str], list[ExchangeRate]]
             continue
 
         # Take third in ranking (if available), otherwise the last one
-        # This gives us the rate we need to slightly improve
         if len(rates) >= 3:
             target_rate = rates[2]  # Third in top
         else:
@@ -162,7 +151,7 @@ def aggregate_rates_for_xml(all_rates: dict[tuple[str, str], list[ExchangeRate]]
             f"Selected for XML: {from_curr} -> {to_curr}: "
             f"{target_rate.exchanger_name} | "
             f"give={target_rate.give_amount:.4f}, receive={target_rate.receive_amount:.4f} | "
-            f"inverse_rate={target_rate.inverse_rate:.4f}"
+            f"rate={target_rate.rate:.8f}"
         )
 
     return result
@@ -176,21 +165,21 @@ if __name__ == "__main__":
     test_rates = [
         ExchangeRate(
             exchanger_name="TestExchanger",
+            from_currency="USDTTRC20",
+            to_currency="SBERRUB",
+            give_amount=1.0,
+            receive_amount=94.5,
+            min_amount=100,
+            max_amount=500000,
+        ),
+        ExchangeRate(
+            exchanger_name="TestExchanger2",
             from_currency="SBERRUB",
             to_currency="BTC",
             give_amount=7053614.9476,
             receive_amount=1.0,
             min_amount=1000,
             max_amount=100000000,
-        ),
-        ExchangeRate(
-            exchanger_name="TestExchanger2",
-            from_currency="SBERRUB",
-            to_currency="USDTTRC20",
-            give_amount=94.5,
-            receive_amount=1.0,
-            min_amount=100,
-            max_amount=500000,
         ),
     ]
 

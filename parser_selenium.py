@@ -18,12 +18,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from parser import ExchangeRate, parse_amount, get_top_rates
-from config import TOP_COUNT, build_exchange_url
+from config import TOP_COUNT, build_exchange_url, CRYPTO_CURRENCIES, FIAT_CURRENCIES
 
 logger = logging.getLogger(__name__)
 
 # Directory for saving HTML files
 HTML_DUMP_DIR = "html_dumps"
+# File for saving parsed URLs
+URLS_LOG_FILE = "parsed_urls.txt"
 
 
 def ensure_html_dump_dir():
@@ -44,6 +46,40 @@ def save_html_to_file(html: str, from_currency: str, to_currency: str) -> str:
 
     logger.info(f"HTML saved to: {filename}")
     return filename
+
+
+def save_url_to_log(url: str, from_currency: str, to_currency: str):
+    """Save parsed URL to log file"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"[{timestamp}] {from_currency} -> {to_currency}: {url}\n"
+
+    with open(URLS_LOG_FILE, 'a', encoding='utf-8') as f:
+        f.write(log_line)
+
+    logger.info(f"URL saved to {URLS_LOG_FILE}")
+
+
+def is_buying_crypto(from_currency: str, to_currency: str) -> bool:
+    """
+    Determine if this is a crypto buying operation.
+
+    Buying crypto: FIAT -> CRYPTO (e.g., SBERRUB -> BTC)
+    Selling crypto: CRYPTO -> FIAT (e.g., BTC -> SBERRUB)
+
+    Returns True if buying crypto, False if selling.
+    """
+    from_is_crypto = from_currency in CRYPTO_CURRENCIES
+    to_is_crypto = to_currency in CRYPTO_CURRENCIES
+
+    # If from is fiat and to is crypto -> buying crypto
+    if not from_is_crypto and to_is_crypto:
+        return True
+    # If from is crypto and to is fiat -> selling crypto
+    elif from_is_crypto and not to_is_crypto:
+        return False
+    # Edge cases (crypto to crypto, fiat to fiat) - default to buying behavior
+    else:
+        return True
 
 
 class SeleniumParser:
@@ -109,6 +145,63 @@ class SeleniumParser:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
+    def _click_sort_header(self, from_currency: str, to_currency: str):
+        """
+        Click on the appropriate sorting header based on operation type.
+
+        When BUYING crypto (FIAT -> CRYPTO):
+            - Click "Отдаете" to sort by price ascending (cheapest first)
+        When SELLING crypto (CRYPTO -> FIAT):
+            - Click "Получаете" to sort by price descending (most expensive first)
+        """
+        buying = is_buying_crypto(from_currency, to_currency)
+
+        if buying:
+            # Buying crypto - sort by "Отдаете" (what you give) ascending
+            header_text = "Отдаете"
+            sort_type = "ascending (cheapest first)"
+        else:
+            # Selling crypto - sort by "Получаете" (what you receive) descending
+            header_text = "Получаете"
+            sort_type = "descending (most expensive first)"
+
+        logger.info(f"Operation: {'BUYING' if buying else 'SELLING'} crypto")
+        logger.info(f"Clicking on '{header_text}' header for {sort_type} sorting...")
+
+        try:
+            # Find the header element with the text
+            header_xpath = f"//div[contains(@class, 'Table_header__el')]//p[text()='{header_text}']"
+
+            wait = WebDriverWait(self.driver, 10)
+            header_elem = wait.until(EC.element_to_be_clickable((By.XPATH, header_xpath)))
+
+            # Click the header to sort
+            header_elem.click()
+            logger.info(f"Clicked '{header_text}' header - first click")
+            time.sleep(1)
+
+            # For buying (ascending) - we might need to click twice to get ascending order
+            # For selling (descending) - we might need to click twice to get descending order
+            # Check if the arrow indicates the right direction and click again if needed
+
+            if buying:
+                # For buying, we want ascending (cheapest first)
+                # Click again to ensure ascending order
+                header_elem.click()
+                logger.info(f"Clicked '{header_text}' header - second click for ascending")
+                time.sleep(1)
+            else:
+                # For selling, first click usually gives descending (most expensive first)
+                # No additional click needed usually
+                pass
+
+            logger.info(f"Sorting applied: {header_text} - {sort_type}")
+
+        except TimeoutException:
+            logger.warning(f"Could not find '{header_text}' header for sorting. Continuing without sorting.")
+        except Exception as e:
+            logger.warning(f"Error clicking sort header: {e}. Continuing without sorting.")
+
     def fetch_exchange_rates(self, from_currency: str, to_currency: str) -> list[ExchangeRate]:
         """
         Fetch exchange rates using Selenium.
@@ -129,12 +222,17 @@ class SeleniumParser:
         logger.info(f"URL: {url}")
         logger.info("=" * 70)
 
+        # Save URL to log file
+        save_url_to_log(url, from_currency, to_currency)
+
         try:
             logger.info("Loading page...")
             self.driver.get(url)
 
             # Wait for table to load
             wait = WebDriverWait(self.driver, 15)
+
+            time.sleep(3)
 
             # Try different selectors
             selectors = [
@@ -158,9 +256,12 @@ class SeleniumParser:
             if not table_loaded:
                 logger.warning("Exchange table not found. Will try to parse page as-is.")
 
-            # Additional wait for full page load
-            logger.info("Waiting 3 seconds for complete page render...")
-            time.sleep(3)
+            # Click on sorting header
+            self._click_sort_header(from_currency, to_currency)
+
+            # Additional wait for page to update after sorting
+            logger.info("Waiting 2 seconds for sorting to apply...")
+            time.sleep(2)
 
             # Get rendered HTML
             html = self.driver.page_source
@@ -187,7 +288,7 @@ class SeleniumParser:
                     f"  {i}. {r.exchanger_name}: "
                     f"give {r.give_amount:.4f} {from_currency}, "
                     f"receive {r.receive_amount:.4f} {to_currency} | "
-                    f"1 {to_currency} = {r.inverse_rate:.4f} {from_currency}"
+                    f"rate={r.rate:.8f}"
                 )
             logger.info("-" * 50)
 
@@ -274,13 +375,15 @@ class SeleniumParser:
                     logger.debug(f"Row {idx}: give_amount is zero, skipping")
                     continue
 
+                # Calculate rate
+                rate = receive_amount / give_amount
+
                 # Log parsed values
                 logger.info(
                     f"PARSED: {name} | "
                     f"give={give_amount:.4f} {from_currency} | "
                     f"receive={receive_amount:.4f} {to_currency} | "
-                    f"rate={receive_amount/give_amount:.10f} | "
-                    f"inverse={give_amount/receive_amount:.4f}"
+                    f"rate={rate:.8f}"
                 )
 
                 # Parse limits
@@ -342,5 +445,5 @@ if __name__ == "__main__":
             for r in rates:
                 print(f"  {r.exchanger_name}:")
                 print(f"    give {r.give_amount:.4f} {r.from_currency}, receive {r.receive_amount:.4f} {r.to_currency}")
-                print(f"    1 {r.to_currency} = {r.inverse_rate:.4f} {r.from_currency}")
+                print(f"    rate = {r.rate:.8f}")
             print()
