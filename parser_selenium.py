@@ -131,6 +131,9 @@ class SeleniumParser:
         options.add_experimental_option('excludeSwitches', ['enable-logging', 'enable-automation'])
         options.add_experimental_option('useAutomationExtension', False)
 
+        # Use "eager" page load strategy - don't wait for all resources
+        options.page_load_strategy = 'eager'
+
         self.driver = webdriver.Chrome(options=options)
         self.driver.set_page_load_timeout(PAGE_TIMEOUT)
         logger.info("WebDriver initialized")
