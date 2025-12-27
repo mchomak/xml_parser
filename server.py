@@ -14,38 +14,32 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify
 
+# Setup logging first
+log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+logging.basicConfig(
+    level=getattr(logging, log_level, logging.INFO),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+logger = logging.getLogger(__name__)
+
+# Import config after logging is set up
 from config import (
     UPDATE_INTERVAL,
     EXCHANGE_DIRECTIONS,
     OUTPUT_XML_PATH,
-    HEADLESS,
-    LOG_LEVEL,
-    LOG_FILE,
     MAX_RETRIES,
 )
-from parser import ExchangeRate, fetch_exchange_rates
-from xml_generator import generate_xml, aggregate_rates_for_xml
-
-
-# Setup logging
-log_level = getattr(logging, LOG_LEVEL.upper(), logging.INFO)
-logging.basicConfig(
-    level=log_level,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ]
-)
-
-logger = logging.getLogger(__name__)
 
 # Flask app
 app = Flask(__name__)
 
 # Parser state
 parser_running = False
-last_update: datetime = None
+last_update = None
 update_count = 0
+last_error = None
 previous_rates = None
 
 
@@ -63,7 +57,7 @@ def collect_all_rates(fetch_func):
             if rates:
                 logger.info(f"OK: {from_currency} -> {to_currency}: {len(rates)} exchangers")
             else:
-                logger.warning(f"EMPTY: {from_currency} -> {to_currency}: no data")
+                logger.warning(f"EMPTY: {from_currency} -> {to_currency}")
                 failed_directions.append((from_currency, to_currency))
 
         except Exception as e:
@@ -84,29 +78,42 @@ def collect_all_rates(fetch_func):
     return all_rates
 
 
-def update_rates_selenium(headless: bool = True):
+def update_rates():
     """Update rates using Selenium."""
-    global last_update, update_count
+    global last_update, update_count, last_error
 
     try:
         from parser_selenium import SeleniumParser
-    except ImportError:
-        logger.error("Selenium not installed")
-        return
+        from xml_generator import generate_xml, aggregate_rates_for_xml
+    except ImportError as e:
+        logger.error(f"Import error: {e}")
+        last_error = str(e)
+        return False
 
     logger.info(f"Starting update ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
 
-    with SeleniumParser(headless=headless) as parser:
-        all_rates = collect_all_rates(parser.fetch_exchange_rates)
-        aggregated_rates = aggregate_rates_for_xml(all_rates)
+    try:
+        # Always use headless mode on server
+        with SeleniumParser(headless=True) as parser:
+            all_rates = collect_all_rates(parser.fetch_exchange_rates)
+            aggregated_rates = aggregate_rates_for_xml(all_rates)
 
-        if aggregated_rates:
-            generate_xml(aggregated_rates, OUTPUT_XML_PATH)
-            last_update = datetime.now()
-            update_count += 1
-            logger.info(f"XML updated: {OUTPUT_XML_PATH}")
-        else:
-            logger.error("No rates available. XML not updated.")
+            if aggregated_rates:
+                generate_xml(aggregated_rates, OUTPUT_XML_PATH)
+                last_update = datetime.now()
+                update_count += 1
+                last_error = None
+                logger.info(f"XML updated: {OUTPUT_XML_PATH}")
+                return True
+            else:
+                last_error = "No rates available"
+                logger.error("No rates available")
+                return False
+
+    except Exception as e:
+        last_error = str(e)
+        logger.exception(f"Update failed: {e}")
+        return False
 
 
 def parser_loop():
@@ -116,15 +123,18 @@ def parser_loop():
     parser_running = True
     logger.info("Parser thread started")
 
-    # Use headless mode for server deployment
-    headless = os.getenv('HEADLESS', 'true').lower() in ('true', '1', 'yes')
+    # Initial delay to let the server start properly
+    time.sleep(5)
 
     while parser_running:
         try:
-            update_rates_selenium(headless=headless)
-            logger.info(f"Update #{update_count} complete. Next in {UPDATE_INTERVAL}s")
+            success = update_rates()
+            if success:
+                logger.info(f"Update #{update_count} complete. Next in {UPDATE_INTERVAL}s")
+            else:
+                logger.warning(f"Update failed. Retrying in {UPDATE_INTERVAL}s")
         except Exception as e:
-            logger.exception(f"Parser error: {e}")
+            logger.exception(f"Parser loop error: {e}")
 
         # Wait for next update
         for _ in range(UPDATE_INTERVAL):
@@ -135,7 +145,7 @@ def parser_loop():
     logger.info("Parser thread stopped")
 
 
-# Start parser thread
+# Parser thread reference
 parser_thread = None
 
 
@@ -144,7 +154,7 @@ def start_parser():
     global parser_thread
 
     if parser_thread is None or not parser_thread.is_alive():
-        parser_thread = threading.Thread(target=parser_loop, daemon=True)
+        parser_thread = threading.Thread(target=parser_loop, daemon=True, name="ParserThread")
         parser_thread.start()
         logger.info("Parser thread launched")
 
@@ -172,13 +182,16 @@ def get_xml():
     xml_path = Path(OUTPUT_XML_PATH)
 
     if xml_path.exists():
-        with open(xml_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        return Response(content, mimetype='application/xml')
-    else:
-        # Return empty rates XML if file doesn't exist yet
-        empty_xml = '<?xml version="1.0" ?>\n<rates generated="" count="0"></rates>'
-        return Response(empty_xml, mimetype='application/xml')
+        try:
+            with open(xml_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return Response(content, mimetype='application/xml')
+        except Exception as e:
+            logger.error(f"Error reading XML: {e}")
+
+    # Return empty XML if file doesn't exist yet
+    empty_xml = '<?xml version="1.0" ?>\n<rates generated="" count="0"></rates>'
+    return Response(empty_xml, mimetype='application/xml')
 
 
 @app.route('/health')
@@ -189,7 +202,6 @@ def health():
         'parser_running': parser_running,
         'last_update': last_update.isoformat() if last_update else None,
         'update_count': update_count,
-        'directions': len(EXCHANGE_DIRECTIONS),
     })
 
 
@@ -203,25 +215,28 @@ def status():
     return jsonify({
         'status': 'running',
         'parser_running': parser_running,
+        'parser_thread_alive': parser_thread.is_alive() if parser_thread else False,
         'last_update': last_update.isoformat() if last_update else None,
+        'last_error': last_error,
         'update_count': update_count,
         'update_interval': UPDATE_INTERVAL,
         'directions': len(EXCHANGE_DIRECTIONS),
         'max_retries': MAX_RETRIES,
-        'xml_file': OUTPUT_XML_PATH,
         'xml_exists': xml_exists,
         'xml_size_bytes': xml_size,
     })
 
 
-# Start parser when app starts
-start_parser()
+# Only start parser when running with gunicorn or directly
+# Don't start on import
+def on_starting(server):
+    """Gunicorn hook - called when server starts."""
+    start_parser()
 
 
+# For running directly with python server.py
 if __name__ == '__main__':
-    # For local development
+    start_parser()
     port = int(os.getenv('PORT', 5000))
-    debug = os.getenv('FLASK_DEBUG', 'false').lower() in ('true', '1', 'yes')
-
     logger.info(f"Starting web server on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=debug)
+    app.run(host='0.0.0.0', port=port, debug=False)
