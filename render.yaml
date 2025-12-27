@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: xml-parser
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: HEADLESS
+        value: "true"
+      - key: UPDATE_INTERVAL
+        value: "30"
+      - key: LOG_LEVEL
+        value: "INFO"
+      - key: MAX_RETRIES
+        value: "3"

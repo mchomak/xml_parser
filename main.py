@@ -4,12 +4,6 @@ Cryptocurrency Exchange Rate Parser for exnode.ru
 
 Runs an infinite loop updating rates every N seconds
 and generates XML file with top-3 competitor rates.
-
-Usage:
-    python main.py                  # Run with requests+bs4
-    python main.py --selenium       # Run with Selenium (for JS rendering)
-    python main.py --once           # Single run (no loop)
-    python main.py --headless       # Run Selenium in headless mode
 """
 
 import argparse
@@ -137,9 +131,6 @@ def update_rates_selenium(headless: bool = None):
     Args:
         headless: If True, run browser in headless mode
     """
-    if headless is None:
-        headless = HEADLESS
-
     try:
         from parser_selenium import SeleniumParser
     except ImportError:
@@ -210,7 +201,7 @@ def main():
     # Select update function
     if SELENIUM:
         def selenium_updater():
-            update_rates_selenium(headless=HEADLESS)
+            update_rates_selenium(headless=True)
         update_func = selenium_updater
     else:
         update_func = update_rates_requests
