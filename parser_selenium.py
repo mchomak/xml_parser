@@ -8,6 +8,8 @@ import re
 import logging
 import time
 import functools
+import subprocess
+import signal
 from datetime import datetime
 from typing import Optional, Callable, Any
 
@@ -84,6 +86,26 @@ def save_url_to_log(url: str, from_currency: str, to_currency: str):
     logger.debug(f"URL logged to {URLS_LOG_FILE}")
 
 
+def kill_chrome_processes():
+    """Kill all orphan Chrome and ChromeDriver processes."""
+    try:
+        # Kill chrome processes
+        subprocess.run(
+            ['pkill', '-f', 'chrome'],
+            capture_output=True,
+            timeout=5
+        )
+        # Kill chromedriver processes
+        subprocess.run(
+            ['pkill', '-f', 'chromedriver'],
+            capture_output=True,
+            timeout=5
+        )
+        logger.debug("Killed orphan Chrome processes")
+    except Exception as e:
+        logger.debug(f"Error killing Chrome processes: {e}")
+
+
 class SeleniumParser:
     """Parser using Selenium for JavaScript-rendered pages"""
 
@@ -96,6 +118,7 @@ class SeleniumParser:
         """
         self.headless = headless
         self.driver: Optional[webdriver.Chrome] = None
+        self._driver_pid: Optional[int] = None
 
     @retry_on_failure()
     def _init_driver(self):
@@ -139,18 +162,32 @@ class SeleniumParser:
         logger.info("WebDriver initialized")
 
     def close(self):
-        """Close WebDriver"""
+        """Close WebDriver and clean up all Chrome processes."""
         if self.driver:
-            self.driver.quit()
-            self.driver = None
-            logger.debug("WebDriver closed")
+            try:
+                self.driver.quit()
+            except Exception as e:
+                logger.warning(f"Error closing driver: {e}")
+            finally:
+                self.driver = None
+
+        # Force kill any remaining Chrome processes
+        kill_chrome_processes()
+        logger.debug("WebDriver closed and cleaned up")
 
     def __enter__(self):
+        # Clean up any orphan processes before starting
+        kill_chrome_processes()
+        time.sleep(1)
         self._init_driver()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
+        # Additional cleanup on error
+        if exc_type is not None:
+            logger.warning(f"Parser exiting with error: {exc_type.__name__}")
+            kill_chrome_processes()
 
     def _click_sort_header(self, from_currency: str, to_currency: str) -> bool:
         """
@@ -252,6 +289,20 @@ class SeleniumParser:
         except WebDriverException as e:
             raise WebDriverException(f"WebDriver error: {e}")
 
+    def _restart_browser(self):
+        """Force restart the browser to recover from errors."""
+        logger.warning("Restarting browser to recover from errors...")
+        try:
+            if self.driver:
+                self.driver.quit()
+        except Exception:
+            pass
+        self.driver = None
+        kill_chrome_processes()
+        time.sleep(2)
+        self._init_driver()
+        logger.info("Browser restarted successfully")
+
     def fetch_exchange_rates(self, from_currency: str, to_currency: str) -> list[ExchangeRate]:
         """
         Fetch exchange rates using Selenium with retry logic.
@@ -277,6 +328,12 @@ class SeleniumParser:
                 self._load_page(url)
                 break
             except Exception as e:
+                error_msg = str(e)
+                # Check if this is a connection error that requires browser restart
+                if 'ERR_CONNECTION' in error_msg or 'net::' in error_msg or 'disconnected' in error_msg.lower():
+                    logger.warning(f"Connection error detected, restarting browser...")
+                    self._restart_browser()
+
                 if attempt < MAX_RETRIES:
                     delay = RETRY_DELAY * (2 ** (attempt - 1))
                     logger.warning(f"Page load attempt {attempt}/{MAX_RETRIES} failed: {e}. Retrying in {delay}s...")

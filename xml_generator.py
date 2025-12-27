@@ -82,6 +82,7 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
         out_elem.appendChild(doc.createTextNode(format_rate(out_value)))
         item.appendChild(out_elem)
 
+        # amount - price in RUB for 1 unit of expensive asset
         amount_value = max(in_value, out_value)
         amount_elem = doc.createElement("amount")
         amount_elem.appendChild(doc.createTextNode(str(amount_value)))
@@ -145,7 +146,7 @@ def aggregate_rates_for_xml(all_rates: dict[tuple[str, str], list[ExchangeRate]]
     """
     Aggregate rates for XML.
 
-    For each direction, we take the third-best rate (to be slightly better than it).
+    For each direction, we take the best rate (first in sorted list).
     """
     result = []
 
@@ -154,11 +155,8 @@ def aggregate_rates_for_xml(all_rates: dict[tuple[str, str], list[ExchangeRate]]
             logger.warning(f"No rates for {from_curr} -> {to_curr}")
             continue
 
-        # Take third in ranking (if available), otherwise the last one
-        if len(rates) >= 3:
-            target_rate = rates[2]  # Third in top
-        else:
-            target_rate = rates[-1]  # Last available
+        # Take the best rate (first in sorted list)
+        target_rate = rates[0]
 
         result.append(target_rate)
 
