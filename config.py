@@ -49,7 +49,7 @@ SELENIUM = get_env_int('SELENIUM', True)
 UPDATE_INTERVAL = get_env_int('UPDATE_INTERVAL', 30)
 
 # Number of top exchangers per direction
-TOP_COUNT = get_env_int('TOP_COUNT', 3)
+TOP_COUNT = get_env_int('TOP_COUNT', 5)
 
 # Output XML file path
 OUTPUT_XML_PATH = os.getenv('OUTPUT_XML_PATH', 'rates.xml')
@@ -59,15 +59,15 @@ MAX_RETRIES = get_env_int('MAX_RETRIES', 3)
 RETRY_DELAY = get_env_float('RETRY_DELAY', 2.0)
 
 # Browser settings
-HEADLESS = get_env_bool('HEADLESS', False)
+HEADLESS = get_env_bool('HEADLESS', True)
 
 # Logging settings
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'DEBUG')
 LOG_FILE = os.getenv('LOG_FILE', 'parser.log')
 
 # Timeouts
-PAGE_TIMEOUT = get_env_int('PAGE_TIMEOUT', 30)
-ELEMENT_TIMEOUT = get_env_int('ELEMENT_TIMEOUT', 15)
+PAGE_TIMEOUT = get_env_int('PAGE_TIMEOUT', 90)
+ELEMENT_TIMEOUT = get_env_int('ELEMENT_TIMEOUT', 30)
 CALCULATOR_WAIT = get_env_float('CALCULATOR_WAIT', 1.5)
 
 # Base URL

@@ -15,17 +15,7 @@ import time
 from datetime import datetime
 from typing import Callable, Optional
 
-from config import (
-    UPDATE_INTERVAL,
-    EXCHANGE_DIRECTIONS,
-    OUTPUT_XML_PATH,
-    HEADLESS,
-    LOG_LEVEL,
-    LOG_FILE,
-    MAX_RETRIES,
-    SELENIUM,
-    ONCE,
-)
+from config import *
 from parser import ExchangeRate, fetch_exchange_rates
 from xml_generator import generate_xml, aggregate_rates_for_xml
 
@@ -197,6 +187,7 @@ def run_loop(update_func: Callable, interval: int = None):
 def main():
     # Setup logging
     setup_logging(level=LOG_LEVEL)
+    logger.info(f"Settings: UPDATE_INTERVAL:{UPDATE_INTERVAL}, TOP_COUNT:{TOP_COUNT}, OUTPUT_XML_PATH:{OUTPUT_XML_PATH}, MAX_RETRIES:{MAX_RETRIES}, RETRY_DELAY:{RETRY_DELAY}, HEADLESS:{HEADLESS}, SELENIUM:{SELENIUM}, ONCE:{ONCE}, PAGE_TIMEOUT:{PAGE_TIMEOUT}, ELEMENT_TIMEOUT:{ELEMENT_TIMEOUT}")
 
     # Select update function
     if SELENIUM:
