@@ -15,8 +15,6 @@ logger = logging.getLogger(__name__)
 
 def toFixed(numObj, digits=0):
     return f"{numObj:.{digits}f}"
-
-
 def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -> str:
     """
     Generate XML file with exchange rates.
@@ -134,18 +132,9 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
 
 def format_rate(rate: float) -> str:
     """
-    Format rate for XML.
-    For large numbers - no decimal part.
-    For small numbers - with sufficient precision.
+    Format rate for XML with exactly 4 decimal places.
     """
-    if rate >= 1000:
-        return str(int(rate))
-    elif rate >= 1:
-        return f"{rate:.2f}"
-    elif rate >= 0.0001:
-        return f"{rate:.5f}"
-    else:
-        return f"{rate:.10f}"
+    return f"{rate:.4f}"
 
 
 def aggregate_rates_for_xml(all_rates: dict[tuple[str, str], list[ExchangeRate]]) -> list[ExchangeRate]:
@@ -182,7 +171,7 @@ def aggregate_rates_for_xml(all_rates: dict[tuple[str, str], list[ExchangeRate]]
         logger.info(
             f"Selected for XML: {from_curr} -> {to_curr}: "
             f"{target_rate.exchanger_name} | "
-            f"price={target_rate.price:.2f} RUB"
+            f"price={target_rate.price:.4f} RUB"
         )
 
     return result
