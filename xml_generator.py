@@ -56,9 +56,10 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
         item.appendChild(to_elem)
 
         # Determine in/out values based on buying/selling
-        # We always input 1 into the expensive currency (crypto) field
+        # Use the price field which is already calculated correctly in parser
         buying = is_buying_crypto(rate.from_currency, rate.to_currency)
 
+        # price = RUB per 1 unit of crypto (already normalized in parser)
         if buying:
             # Buying crypto (FIAT -> CRYPTO): we input 1 in toInput
             # give_amount = how much fiat for 1 crypto
@@ -146,8 +147,10 @@ def aggregate_rates_for_xml(all_rates: dict[tuple[str, str], list[ExchangeRate]]
     """
     Aggregate rates for XML.
 
-    For each direction, we take the best rate (first in sorted list).
+    For each direction, we take the best rate from competitors (excluding our own exchangers).
     """
+    from config import EXCLUDED_EXCHANGERS
+
     result = []
 
     for (from_curr, to_curr), rates in all_rates.items():
@@ -155,15 +158,25 @@ def aggregate_rates_for_xml(all_rates: dict[tuple[str, str], list[ExchangeRate]]
             logger.warning(f"No rates for {from_curr} -> {to_curr}")
             continue
 
-        # Take the best rate (first in sorted list)
-        target_rate = rates[0]
+        # Filter out our own exchangers
+        competitor_rates = [
+            r for r in rates
+            if r.exchanger_name not in EXCLUDED_EXCHANGERS
+        ]
+
+        if not competitor_rates:
+            logger.warning(f"No competitor rates for {from_curr} -> {to_curr} (all excluded)")
+            # Fall back to first rate if all are excluded
+            competitor_rates = rates
+
+        # Take the best competitor rate (first in sorted list)
+        target_rate = competitor_rates[0]
 
         result.append(target_rate)
 
         logger.info(
             f"Selected for XML: {from_curr} -> {to_curr}: "
             f"{target_rate.exchanger_name} | "
-            f"give={target_rate.give_amount:.4f}, receive={target_rate.receive_amount:.4f} | "
             f"price={target_rate.price:.2f} RUB"
         )
 

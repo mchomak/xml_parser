@@ -41,6 +41,15 @@ def get_env_bool(key: str, default: bool) -> bool:
     return value.lower() in ('true', '1', 'yes', 'on')
 
 
+def get_env_list(key: str, default: list = None) -> list:
+    """Get list value from environment (comma-separated)"""
+    value = os.getenv(key)
+    if value is None:
+        return default or []
+    # Split by comma and strip whitespace
+    return [item.strip() for item in value.split(',') if item.strip()]
+
+
 ONCE = get_env_bool('ONCE', False)
 
 SELENIUM = get_env_int('SELENIUM', True)
@@ -49,10 +58,13 @@ SELENIUM = get_env_int('SELENIUM', True)
 UPDATE_INTERVAL = get_env_int('UPDATE_INTERVAL', 30)
 
 # Number of top exchangers per direction
-TOP_COUNT = get_env_int('TOP_COUNT', 5)
+TOP_COUNT = get_env_int('TOP_COUNT', 3)
 
 # Output XML file path
 OUTPUT_XML_PATH = os.getenv('OUTPUT_XML_PATH', 'rates.xml')
+
+# Excluded exchangers (our own exchangers to ignore when selecting best rate)
+EXCLUDED_EXCHANGERS = get_env_list('EXCLUDED_EXCHANGERS', ['Frax', 'Taksa', 'Bastion'])
 
 # Retry settings
 MAX_RETRIES = get_env_int('MAX_RETRIES', 3)
