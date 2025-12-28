@@ -117,7 +117,7 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
         logger.info(
             f"XML: {rate.from_currency} -> {rate.to_currency}: "
             f"in={format_rate(in_value)}, out={format_rate(out_value)}, "
-            f"amount={int(amount_value)} (exchanger: {rate.exchanger_name})"
+            f"amount={amount_value} (exchanger: {rate.exchanger_name})"
         )
 
     # Generate pretty XML
