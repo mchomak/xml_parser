@@ -55,7 +55,7 @@ ONCE = get_env_bool('ONCE', False)
 SELENIUM = get_env_int('SELENIUM', True)
 
 # Update interval in seconds
-UPDATE_INTERVAL = get_env_int('UPDATE_INTERVAL', 30)
+UPDATE_INTERVAL = get_env_int('UPDATE_INTERVAL', 15)
 
 # Number of top exchangers per direction
 TOP_COUNT = get_env_int('TOP_COUNT', 3)

@@ -13,6 +13,10 @@ from config import DEFAULT_VALUES, OUTPUT_XML_PATH
 logger = logging.getLogger(__name__)
 
 
+def toFixed(numObj, digits=0):
+    return f"{numObj:.{digits}f}"
+
+
 def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -> str:
     """
     Generate XML file with exchange rates.
@@ -85,6 +89,7 @@ def generate_xml(rates: list[ExchangeRate], output_path: Optional[str] = None) -
 
         # amount - price in RUB for 1 unit of expensive asset
         amount_value = max(in_value, out_value)
+        amount_value = toFixed(amount_value, 4)
         amount_elem = doc.createElement("amount")
         amount_elem.appendChild(doc.createTextNode(str(amount_value)))
         item.appendChild(amount_elem)
