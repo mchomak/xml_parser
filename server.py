@@ -9,7 +9,6 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -31,7 +30,6 @@ from config import (
     EXCHANGE_DIRECTIONS,
     OUTPUT_XML_PATH,
     MAX_RETRIES,
-    PARALLEL_WORKERS,
 )
 
 # Flask app
@@ -45,24 +43,47 @@ last_error = None
 previous_rates = None
 
 
-def fetch_single_direction(args):
-    """Fetch a single direction using a new browser instance."""
-    from_currency, to_currency = args
-    try:
-        from parser_selenium import SeleniumParser
-        with SeleniumParser(headless=True) as parser:
-            rates = parser.fetch_exchange_rates(from_currency, to_currency)
-            return (from_currency, to_currency), rates
-    except Exception as e:
-        logger.error(f"Error fetching {from_currency} -> {to_currency}: {e}")
-        return (from_currency, to_currency), []
+def collect_all_rates(fetch_func):
+    """Collect rates for all exchange directions."""
+    global previous_rates
+    all_rates = {}
+    failed_directions = []
+
+    for from_currency, to_currency in EXCHANGE_DIRECTIONS:
+        try:
+            rates = fetch_func(from_currency, to_currency)
+            all_rates[(from_currency, to_currency)] = rates
+
+            if rates:
+                logger.info(f"OK: {from_currency} -> {to_currency}: {len(rates)} exchangers")
+            else:
+                logger.warning(f"EMPTY: {from_currency} -> {to_currency}")
+                failed_directions.append((from_currency, to_currency))
+
+        except Exception as e:
+            logger.error(f"ERROR: {from_currency} -> {to_currency}: {e}")
+            all_rates[(from_currency, to_currency)] = []
+            failed_directions.append((from_currency, to_currency))
+
+    # Use previous rates for failed directions
+    if previous_rates and failed_directions:
+        for direction in failed_directions:
+            if direction in previous_rates and previous_rates[direction]:
+                logger.warning(f"Using previous data for {direction[0]} -> {direction[1]}")
+                all_rates[direction] = previous_rates[direction]
+
+    if all_rates:
+        previous_rates = all_rates.copy()
+
+    return all_rates
 
 
 def update_rates():
-    """Update rates using Selenium with parallel fetching."""
-    global last_update, update_count, last_error, previous_rates
+    """Update rates using Selenium."""
+    global last_update, update_count, last_error
 
     try:
+        from parser_selenium import SeleniumParser
         from xml_generator import generate_xml, aggregate_rates_for_xml
     except ImportError as e:
         logger.error(f"Import error: {e}")
@@ -70,61 +91,24 @@ def update_rates():
         return False
 
     logger.info(f"Starting update ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
-    logger.info(f"Parallel workers: {PARALLEL_WORKERS}")
-
-    all_rates = {}
-    failed_directions = []
-
-    # Prepare arguments for parallel fetching
-    fetch_args = [(from_curr, to_curr) for from_curr, to_curr in EXCHANGE_DIRECTIONS]
 
     try:
-        # Fetch in parallel using ThreadPoolExecutor
-        with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
-            futures = {executor.submit(fetch_single_direction, arg): arg for arg in fetch_args}
+        # Always use headless mode on server
+        with SeleniumParser(headless=True) as parser:
+            all_rates = collect_all_rates(parser.fetch_exchange_rates)
+            aggregated_rates = aggregate_rates_for_xml(all_rates)
 
-            for future in as_completed(futures):
-                try:
-                    direction, rates = future.result()
-                    all_rates[direction] = rates
-
-                    if rates:
-                        logger.info(f"OK: {direction[0]} -> {direction[1]}: {len(rates)} exchangers")
-                    else:
-                        logger.warning(f"EMPTY: {direction[0]} -> {direction[1]}")
-                        failed_directions.append(direction)
-
-                except Exception as e:
-                    arg = futures[future]
-                    direction = (arg[0], arg[1])
-                    logger.error(f"ERROR: {direction[0]} -> {direction[1]}: {e}")
-                    all_rates[direction] = []
-                    failed_directions.append(direction)
-
-        # Use previous rates for failed directions
-        if previous_rates and failed_directions:
-            for direction in failed_directions:
-                if direction in previous_rates and previous_rates[direction]:
-                    logger.warning(f"Using previous data for {direction[0]} -> {direction[1]}")
-                    all_rates[direction] = previous_rates[direction]
-
-        # Store successful rates for future fallback
-        if all_rates:
-            previous_rates = all_rates.copy()
-
-        aggregated_rates = aggregate_rates_for_xml(all_rates)
-
-        if aggregated_rates:
-            generate_xml(aggregated_rates, OUTPUT_XML_PATH)
-            last_update = datetime.now()
-            update_count += 1
-            last_error = None
-            logger.info(f"XML updated: {OUTPUT_XML_PATH}")
-            return True
-        else:
-            last_error = "No rates available"
-            logger.error("No rates available")
-            return False
+            if aggregated_rates:
+                generate_xml(aggregated_rates, OUTPUT_XML_PATH)
+                last_update = datetime.now()
+                update_count += 1
+                last_error = None
+                logger.info(f"XML updated: {OUTPUT_XML_PATH}")
+                return True
+            else:
+                last_error = "No rates available"
+                logger.error("No rates available")
+                return False
 
     except Exception as e:
         last_error = str(e)
@@ -152,11 +136,7 @@ def parser_loop():
         except Exception as e:
             logger.exception(f"Parser loop error: {e}")
 
-        # Wait for next update
-        for _ in range(UPDATE_INTERVAL):
-            if not parser_running:
-                break
-            time.sleep(1)
+        time.sleep(UPDATE_INTERVAL)
 
     logger.info("Parser thread stopped")
 

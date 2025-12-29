@@ -10,7 +10,6 @@ import time
 import functools
 import subprocess
 import signal
-import platform
 from datetime import datetime
 from typing import Optional, Callable, Any
 
@@ -90,30 +89,18 @@ def save_url_to_log(url: str, from_currency: str, to_currency: str):
 def kill_chrome_processes():
     """Kill all orphan Chrome and ChromeDriver processes."""
     try:
-        if platform.system() == 'Windows':
-            # Windows: use taskkill
-            subprocess.run(
-                ['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
-                capture_output=True,
-                timeout=10
-            )
-            subprocess.run(
-                ['taskkill', '/F', '/IM', 'chromedriver.exe', '/T'],
-                capture_output=True,
-                timeout=10
-            )
-        else:
-            # Linux/Mac: use pkill
-            subprocess.run(
-                ['pkill', '-f', 'chrome'],
-                capture_output=True,
-                timeout=5
-            )
-            subprocess.run(
-                ['pkill', '-f', 'chromedriver'],
-                capture_output=True,
-                timeout=5
-            )
+        # Kill chrome processes
+        subprocess.run(
+            ['pkill', '-f', 'chrome'],
+            capture_output=True,
+            timeout=5
+        )
+        # Kill chromedriver processes
+        subprocess.run(
+            ['pkill', '-f', 'chromedriver'],
+            capture_output=True,
+            timeout=5
+        )
         logger.debug("Killed orphan Chrome processes")
     except Exception as e:
         logger.debug(f"Error killing Chrome processes: {e}")
@@ -251,10 +238,14 @@ class SeleniumParser:
             input_elem = wait.until(EC.presence_of_element_located((By.ID, input_id)))
 
             input_elem.click()
+            time.sleep(0.3)
             input_elem.send_keys(Keys.CONTROL + "a")
-            input_elem.send_keys("1")  # Replace selected text with "1"
+            time.sleep(0.1)
+            input_elem.send_keys(Keys.DELETE)
+            time.sleep(0.1)
+            input_elem.send_keys("1")
 
-            time.sleep(0.5)  # Brief wait for table to update
+            time.sleep(CALCULATOR_WAIT)
 
             other_input_id = "fromInput" if input_id == "toInput" else "toInput"
             other_input = self.driver.find_element(By.ID, other_input_id)
@@ -366,13 +357,36 @@ class SeleniumParser:
             logger.error(f"Failed to set calculator input after {MAX_RETRIES} attempts")
             return []
 
-        # Click sorting header to get best rates first (optional retry)
-        self._click_sort_header(from_currency, to_currency)
-        time.sleep(0.5)
+        time.sleep(1)
 
-        # Collect rates from page
-        html = self.driver.page_source
-        rates = self._parse_page(html, from_currency, to_currency)
+        # Collect prices BEFORE sorting
+        logger.debug("Collecting prices before sorting...")
+        html_before = self.driver.page_source
+        rates_before = self._parse_page(html_before, from_currency, to_currency)
+
+        # Click sorting header (with retry)
+        for attempt in range(1, MAX_RETRIES + 1):
+            if self._click_sort_header(from_currency, to_currency):
+                break
+            if attempt < MAX_RETRIES:
+                delay = RETRY_DELAY * (2 ** (attempt - 1))
+                logger.warning(f"Sort header click attempt {attempt}/{MAX_RETRIES} failed. Retrying in {delay}s...")
+                time.sleep(delay)
+
+        time.sleep(2)
+
+        # Collect prices AFTER sorting
+        logger.debug("Collecting prices after sorting...")
+        html_after = self.driver.page_source
+        rates_after = self._parse_page(html_after, from_currency, to_currency)
+
+        # Merge rates from before and after
+        all_rates_dict = {}
+        for r in rates_before + rates_after:
+            if r.exchanger_name not in all_rates_dict:
+                all_rates_dict[r.exchanger_name] = r
+
+        rates = list(all_rates_dict.values())
 
         if not rates:
             logger.error(f"No exchangers found for {from_currency} -> {to_currency}")
@@ -384,7 +398,7 @@ class SeleniumParser:
 
         logger.info(f"Found {len(top_rates)} top exchangers for {from_currency} -> {to_currency}")
         for i, r in enumerate(top_rates, 1):
-            logger.info(f"  {i}. {r.exchanger_name}: price={r.price:.4f} RUB")
+            logger.info(f"  {i}. {r.exchanger_name}: price={r.price:.2f} RUB")
 
         return top_rates
 
@@ -424,43 +438,14 @@ class SeleniumParser:
                 if give_amount is None or receive_amount is None or give_amount == 0:
                     continue
 
-                # Calculate price (RUB per 1 unit of crypto)
+                # Calculate price
                 buying = is_buying_crypto(from_currency, to_currency)
-
-                # Log raw values for debugging
-                logger.info(f"Raw: {name} | give={give_amount:.4f}, receive={receive_amount:.4f}")
-
-                # The table might show:
-                # 1) Normalized: give=1, receive=rate (e.g., 1 USDT -> 87.86 RUB)
-                # 2) Non-normalized: give=amount, receive=total (e.g., 120 USDT -> 10543 RUB)
-                #
-                # We always calculate: price = receive / give (for selling)
-                # This works for both cases as long as the ratio is correct
-
                 if buying:
-                    # Buying crypto (FIAT -> CRYPTO): give RUB, receive crypto
-                    # price = RUB per 1 crypto = give_amount / receive_amount
-                    if receive_amount > 0:
-                        price = give_amount / receive_amount
-                    else:
-                        price = give_amount
+                    price = give_amount / receive_amount if receive_amount != 0 else 0
                 else:
-                    # Selling crypto (CRYPTO -> FIAT): give crypto, receive RUB
-                    # price = RUB per 1 crypto = receive_amount / give_amount
-                    if give_amount > 0:
-                        price = receive_amount / give_amount
-                    else:
-                        price = receive_amount
+                    price = receive_amount / give_amount if give_amount != 0 else 0
 
-                # Sanity check: for USDT, price should be around 80-100 RUB
-                # If price < 10, the table might be showing rate differently
-                if not buying and price < 10 and receive_amount > 10:
-                    # Table probably shows rate directly in receive column
-                    # (e.g., "87.86 RUB" means 87.86 RUB per 1 crypto)
-                    logger.warning(f"Price sanity check failed: {price:.4f} < 10, using receive_amount={receive_amount:.4f}")
-                    price = receive_amount
-
-                logger.info(f"Parsed: {name} | price={price:.4f} RUB (buying={buying})")
+                logger.debug(f"Parsed: {name} | price={price:.2f} RUB")
 
                 # Parse limits
                 min_amount = None
