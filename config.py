@@ -70,16 +70,19 @@ EXCLUDED_EXCHANGERS = get_env_list('EXCLUDED_EXCHANGERS', ['Frax', 'Taksa', 'Bas
 MAX_RETRIES = get_env_int('MAX_RETRIES', 3)
 RETRY_DELAY = get_env_float('RETRY_DELAY', 2.0)
 
+# Parallel parsing settings
+PARALLEL_WORKERS = get_env_int('PARALLEL_WORKERS', 3)
+
 # Browser settings
 HEADLESS = get_env_bool('HEADLESS', True)
 
 # Logging settings
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'DEBUG')
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 LOG_FILE = os.getenv('LOG_FILE', 'parser.log')
 
 # Timeouts
-PAGE_TIMEOUT = get_env_int('PAGE_TIMEOUT', 90)
-ELEMENT_TIMEOUT = get_env_int('ELEMENT_TIMEOUT', 30)
+PAGE_TIMEOUT = get_env_int('PAGE_TIMEOUT', 30)
+ELEMENT_TIMEOUT = get_env_int('ELEMENT_TIMEOUT', 15)
 CALCULATOR_WAIT = get_env_float('CALCULATOR_WAIT', 1.5)
 
 # Base URL
