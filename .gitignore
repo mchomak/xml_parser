@@ -12,7 +12,7 @@ venv/
 .env
 
 # Logs
-*.log
+# *.log
 # parser.log
 
 # Output files
