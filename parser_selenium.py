@@ -29,9 +29,6 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-# File for saving parsed URLs
-URLS_LOG_FILE = "parsed_urls.txt"
-
 
 def retry_on_failure(max_retries: int = None, delay: float = None):
     """
@@ -73,17 +70,6 @@ def retry_on_failure(max_retries: int = None, delay: float = None):
 
         return wrapper
     return decorator
-
-
-def save_url_to_log(url: str, from_currency: str, to_currency: str):
-    """Save parsed URL to log file"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"[{timestamp}] {from_currency} -> {to_currency}: {url}\n"
-
-    with open(URLS_LOG_FILE, 'a', encoding='utf-8') as f:
-        f.write(log_line)
-
-    logger.debug(f"URL logged to {URLS_LOG_FILE}")
 
 
 def kill_chrome_processes():
@@ -319,8 +305,6 @@ class SeleniumParser:
         url = build_exchange_url(from_currency, to_currency)
         logger.info(f"Fetching: {from_currency} -> {to_currency}")
         logger.debug(f"URL: {url}")
-
-        save_url_to_log(url, from_currency, to_currency)
 
         # Try to load page with retries
         for attempt in range(1, MAX_RETRIES + 1):

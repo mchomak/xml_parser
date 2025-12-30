@@ -13,7 +13,7 @@ venv/
 
 # Logs
 *.log
-parser.log
+# parser.log
 
 # Output files
 rates.xml
