@@ -10,6 +10,7 @@ import time
 import functools
 import subprocess
 import signal
+import platform
 from datetime import datetime
 from typing import Optional, Callable, Any
 
@@ -75,18 +76,30 @@ def retry_on_failure(max_retries: int = None, delay: float = None):
 def kill_chrome_processes():
     """Kill all orphan Chrome and ChromeDriver processes."""
     try:
-        # Kill chrome processes
-        subprocess.run(
-            ['pkill', '-f', 'chrome'],
-            capture_output=True,
-            timeout=5
-        )
-        # Kill chromedriver processes
-        subprocess.run(
-            ['pkill', '-f', 'chromedriver'],
-            capture_output=True,
-            timeout=5
-        )
+        if platform.system() == 'Windows':
+            # Windows: use taskkill
+            subprocess.run(
+                ['taskkill', '/F', '/IM', 'chrome.exe', '/T'],
+                capture_output=True,
+                timeout=10
+            )
+            subprocess.run(
+                ['taskkill', '/F', '/IM', 'chromedriver.exe', '/T'],
+                capture_output=True,
+                timeout=10
+            )
+        else:
+            # Linux/Mac: use pkill
+            subprocess.run(
+                ['pkill', '-f', 'chrome'],
+                capture_output=True,
+                timeout=5
+            )
+            subprocess.run(
+                ['pkill', '-f', 'chromedriver'],
+                capture_output=True,
+                timeout=5
+            )
         logger.debug("Killed orphan Chrome processes")
     except Exception as e:
         logger.debug(f"Error killing Chrome processes: {e}")
@@ -224,14 +237,10 @@ class SeleniumParser:
             input_elem = wait.until(EC.presence_of_element_located((By.ID, input_id)))
 
             input_elem.click()
-            time.sleep(0.3)
             input_elem.send_keys(Keys.CONTROL + "a")
-            time.sleep(0.1)
-            input_elem.send_keys(Keys.DELETE)
-            time.sleep(0.1)
-            input_elem.send_keys("1")
+            input_elem.send_keys("1")  # Replace selected text with "1"
 
-            time.sleep(CALCULATOR_WAIT)
+            time.sleep(0.5)  # Brief wait for table to update
 
             other_input_id = "fromInput" if input_id == "toInput" else "toInput"
             other_input = self.driver.find_element(By.ID, other_input_id)
@@ -341,36 +350,13 @@ class SeleniumParser:
             logger.error(f"Failed to set calculator input after {MAX_RETRIES} attempts")
             return []
 
-        time.sleep(1)
+        # Click sorting header to get best rates first (optional retry)
+        self._click_sort_header(from_currency, to_currency)
+        time.sleep(0.5)
 
-        # Collect prices BEFORE sorting
-        logger.debug("Collecting prices before sorting...")
-        html_before = self.driver.page_source
-        rates_before = self._parse_page(html_before, from_currency, to_currency)
-
-        # Click sorting header (with retry)
-        for attempt in range(1, MAX_RETRIES + 1):
-            if self._click_sort_header(from_currency, to_currency):
-                break
-            if attempt < MAX_RETRIES:
-                delay = RETRY_DELAY * (2 ** (attempt - 1))
-                logger.warning(f"Sort header click attempt {attempt}/{MAX_RETRIES} failed. Retrying in {delay}s...")
-                time.sleep(delay)
-
-        time.sleep(2)
-
-        # Collect prices AFTER sorting
-        logger.debug("Collecting prices after sorting...")
-        html_after = self.driver.page_source
-        rates_after = self._parse_page(html_after, from_currency, to_currency)
-
-        # Merge rates from before and after
-        all_rates_dict = {}
-        for r in rates_before + rates_after:
-            if r.exchanger_name not in all_rates_dict:
-                all_rates_dict[r.exchanger_name] = r
-
-        rates = list(all_rates_dict.values())
+        # Collect rates from page
+        html = self.driver.page_source
+        rates = self._parse_page(html, from_currency, to_currency)
 
         if not rates:
             logger.error(f"No exchangers found for {from_currency} -> {to_currency}")
@@ -382,7 +368,7 @@ class SeleniumParser:
 
         logger.info(f"Found {len(top_rates)} top exchangers for {from_currency} -> {to_currency}")
         for i, r in enumerate(top_rates, 1):
-            logger.info(f"  {i}. {r.exchanger_name}: price={r.price:.2f} RUB")
+            logger.info(f"  {i}. {r.exchanger_name}: price={r.price:.4f} RUB")
 
         return top_rates
 
@@ -422,14 +408,26 @@ class SeleniumParser:
                 if give_amount is None or receive_amount is None or give_amount == 0:
                     continue
 
-                # Calculate price
+                # Calculate price (RUB per 1 unit of crypto)
                 buying = is_buying_crypto(from_currency, to_currency)
-                if buying:
-                    price = give_amount / receive_amount if receive_amount != 0 else 0
-                else:
-                    price = receive_amount / give_amount if give_amount != 0 else 0
 
-                logger.debug(f"Parsed: {name} | price={price:.2f} RUB")
+                # Log raw values for debugging
+                logger.debug(f"Raw: {name} | give={give_amount:.4f}, receive={receive_amount:.4f}")
+
+                # The exnode.ru table shows RATE in receive/give columns, not total amount
+                # For selling crypto: "Получаете" column shows RUB rate per 1 crypto
+                # For buying crypto: "Отдаёте" column shows RUB rate per 1 crypto
+
+                if buying:
+                    # Buying crypto (FIAT -> CRYPTO): "Отдаёте" shows RUB per 1 crypto
+                    # The give_amount IS the rate, use it directly
+                    price = give_amount
+                else:
+                    # Selling crypto (CRYPTO -> FIAT): "Получаете" shows RUB per 1 crypto
+                    # The receive_amount IS the rate, use it directly
+                    price = receive_amount
+
+                logger.debug(f"Parsed: {name} | price={price:.4f} RUB (buying={buying})")
 
                 # Parse limits
                 min_amount = None
