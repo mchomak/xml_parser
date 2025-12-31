@@ -15,14 +15,16 @@ import signal
 import platform
 from datetime import datetime
 from typing import Optional, Callable, Any
+from pathlib import Path
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException, StaleElementReferenceException
 from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.action_chains import ActionChains
 
 from parser import ExchangeRate, parse_amount, get_top_rates, is_buying_crypto
 from config import (
@@ -31,6 +33,10 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Directory for debug screenshots
+DEBUG_SCREENSHOTS_DIR = Path(os.getenv('DEBUG_SCREENSHOTS_DIR', '/tmp/parser_screenshots'))
+SAVE_DEBUG_SCREENSHOTS = os.getenv('SAVE_DEBUG_SCREENSHOTS', 'true').lower() == 'true'
 
 
 # Restart browser every N requests to prevent memory leaks
@@ -115,6 +121,29 @@ def kill_chrome_processes():
 class SeleniumParser:
     """Parser using Selenium for JavaScript-rendered pages"""
 
+    # Multiple selectors for table elements (fallback list)
+    TABLE_SELECTORS = [
+        "[class*='Table_body__el__']",
+        "[class*='Table_body__amount']",
+        "[class*='exchanger']",
+        "[class*='Exchanger']",
+        "div[class*='body__el']",
+        ".exchange-table",
+        "[class*='rates']",
+    ]
+
+    # Multiple selectors for calculator inputs (fallback list)
+    CALCULATOR_INPUT_SELECTORS = [
+        "#{input_id}",  # #fromInput or #toInput
+        "input[id='{input_id}']",
+        "input[name='{input_id}']",
+        "[class*='calculator'] input",
+        "[class*='Calculator'] input",
+        "[class*='exchange'] input[type='number']",
+        "[class*='Exchange'] input[type='text']",
+        "input[type='number']",
+    ]
+
     def __init__(self, headless: bool = False):
         """
         Initialize parser.
@@ -126,6 +155,11 @@ class SeleniumParser:
         self.driver: Optional[webdriver.Chrome] = None
         self._driver_pid: Optional[int] = None
         self._request_count = 0  # Counter for auto-restart
+        self._current_direction = ""  # For screenshot naming
+
+        # Create screenshots directory if enabled
+        if SAVE_DEBUG_SCREENSHOTS:
+            DEBUG_SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 
     @retry_on_failure()
     def _init_driver(self):
@@ -210,6 +244,86 @@ class SeleniumParser:
             logger.warning(f"Parser exiting with error: {exc_type.__name__}")
             kill_chrome_processes()
 
+    def _save_debug_screenshot(self, name: str) -> Optional[str]:
+        """Save debug screenshot for troubleshooting."""
+        if not SAVE_DEBUG_SCREENSHOTS or not self.driver:
+            return None
+
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{timestamp}_{self._current_direction}_{name}.png"
+            filepath = DEBUG_SCREENSHOTS_DIR / filename
+            self.driver.save_screenshot(str(filepath))
+            logger.debug(f"Debug screenshot saved: {filepath}")
+            return str(filepath)
+        except Exception as e:
+            logger.debug(f"Failed to save screenshot: {e}")
+            return None
+
+    def _check_cloudflare_challenge(self) -> bool:
+        """Check if page shows Cloudflare challenge or captcha."""
+        if not self.driver:
+            return False
+
+        try:
+            page_source = self.driver.page_source.lower()
+            title = self.driver.title.lower()
+
+            cloudflare_indicators = [
+                'checking your browser',
+                'just a moment',
+                'cloudflare',
+                'ddos protection',
+                'please wait',
+                'ray id',
+                'cf-browser-verification',
+                'challenge-running',
+            ]
+
+            for indicator in cloudflare_indicators:
+                if indicator in page_source or indicator in title:
+                    logger.warning(f"Cloudflare challenge detected: '{indicator}'")
+                    return True
+
+            return False
+        except Exception as e:
+            logger.debug(f"Error checking Cloudflare: {e}")
+            return False
+
+    def _wait_for_cloudflare(self, timeout: int = 30) -> bool:
+        """Wait for Cloudflare challenge to complete."""
+        logger.info("Waiting for Cloudflare challenge to complete...")
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            if not self._check_cloudflare_challenge():
+                logger.info("Cloudflare challenge passed")
+                return True
+            time.sleep(2)
+
+        logger.warning(f"Cloudflare challenge not resolved within {timeout}s")
+        self._save_debug_screenshot("cloudflare_timeout")
+        return False
+
+    def _find_element_with_fallback(self, selectors: list, timeout: float = 5.0) -> Optional[any]:
+        """
+        Try to find element using multiple selectors.
+        Uses shorter timeout per selector but tries all of them.
+        """
+        for selector in selectors:
+            try:
+                wait = WebDriverWait(self.driver, timeout)
+                element = wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                logger.debug(f"Found element with selector: {selector}")
+                return element
+            except TimeoutException:
+                continue
+            except Exception as e:
+                logger.debug(f"Error with selector {selector}: {e}")
+                continue
+
+        return None
+
     def _click_sort_header(self, from_currency: str, to_currency: str) -> bool:
         """
         Click on the appropriate sorting header based on operation type.
@@ -250,29 +364,117 @@ class SeleniumParser:
         """
         buying = is_buying_crypto(from_currency, to_currency)
         input_id = "toInput" if buying else "fromInput"
+        other_input_id = "fromInput" if buying else "toInput"
         expensive_currency = to_currency if buying else from_currency
 
         logger.debug(f"Setting 1 {expensive_currency} in #{input_id}")
 
+        input_elem = None
+
+        # Try multiple selector strategies with shorter timeouts
+        per_selector_timeout = min(3.0, ELEMENT_TIMEOUT / 5)
+
+        # Strategy 1: Direct ID lookup
         try:
-            wait = WebDriverWait(self.driver, ELEMENT_TIMEOUT)
+            wait = WebDriverWait(self.driver, per_selector_timeout)
             input_elem = wait.until(EC.presence_of_element_located((By.ID, input_id)))
+            logger.debug(f"Found input by ID: #{input_id}")
+        except TimeoutException:
+            pass
 
-            input_elem.click()
-            input_elem.send_keys(Keys.CONTROL + "a")
-            input_elem.send_keys("1")  # Replace selected text with "1"
+        # Strategy 2: Try CSS selector with ID
+        if not input_elem:
+            try:
+                wait = WebDriverWait(self.driver, per_selector_timeout)
+                input_elem = wait.until(EC.presence_of_element_located(
+                    (By.CSS_SELECTOR, f"input#{input_id}")
+                ))
+                logger.debug(f"Found input by CSS: input#{input_id}")
+            except TimeoutException:
+                pass
 
-            time.sleep(0.5)  # Brief wait for table to update
+        # Strategy 3: Find all inputs and identify by position/context
+        if not input_elem:
+            try:
+                all_inputs = self.driver.find_elements(By.CSS_SELECTOR, "input[type='text'], input[type='number'], input:not([type])")
+                logger.debug(f"Found {len(all_inputs)} input elements")
 
-            other_input_id = "fromInput" if input_id == "toInput" else "toInput"
-            other_input = self.driver.find_element(By.ID, other_input_id)
-            calculated_value = other_input.get_attribute("value")
+                # Log all inputs for debugging
+                for idx, inp in enumerate(all_inputs[:10]):
+                    inp_id = inp.get_attribute('id') or 'no-id'
+                    inp_class = inp.get_attribute('class') or 'no-class'
+                    inp_value = inp.get_attribute('value') or ''
+                    logger.debug(f"  Input {idx}: id={inp_id}, class={inp_class[:50]}, value={inp_value}")
 
-            logger.debug(f"Calculator: 1 {expensive_currency} = {calculated_value}")
+                    # Check if this is our target input
+                    if input_id.lower() in inp_id.lower():
+                        input_elem = inp
+                        logger.debug(f"Found target input by ID match: {inp_id}")
+                        break
+
+                # If still not found, try finding by placeholder or surrounding text
+                if not input_elem and all_inputs:
+                    # Usually the calculator has 2 main inputs - give and receive
+                    # For buying crypto: first input is "give" (fiat), second is "receive" (crypto)
+                    # For selling crypto: first input is "give" (crypto), second is "receive" (fiat)
+                    if len(all_inputs) >= 2:
+                        # fromInput is typically the first calculator input
+                        # toInput is typically the second calculator input
+                        if input_id == "fromInput":
+                            input_elem = all_inputs[0]
+                        else:
+                            input_elem = all_inputs[1]
+                        logger.debug(f"Using input by position: {'first' if input_id == 'fromInput' else 'second'}")
+
+            except Exception as e:
+                logger.debug(f"Error finding inputs: {e}")
+
+        if not input_elem:
+            logger.warning(f"Calculator input #{input_id} not found with any strategy")
+            self._save_debug_screenshot(f"input_not_found_{input_id}")
+            return False
+
+        # Try to set the value
+        try:
+            # Scroll to element first
+            self.driver.execute_script("arguments[0].scrollIntoView(true);", input_elem)
+            time.sleep(0.3)
+
+            # Clear and set value using multiple methods
+            try:
+                # Method 1: Click, select all, type
+                input_elem.click()
+                time.sleep(0.2)
+                input_elem.send_keys(Keys.CONTROL + "a")
+                input_elem.send_keys("1")
+            except Exception:
+                try:
+                    # Method 2: Use JavaScript to set value
+                    self.driver.execute_script("arguments[0].value = '1';", input_elem)
+                    # Trigger input event to update the page
+                    self.driver.execute_script("""
+                        var event = new Event('input', { bubbles: true });
+                        arguments[0].dispatchEvent(event);
+                    """, input_elem)
+                except Exception as e:
+                    logger.warning(f"Failed to set input value: {e}")
+                    return False
+
+            # Wait for table to update
+            time.sleep(CALCULATOR_WAIT)
+
+            # Try to get calculated value from other input
+            try:
+                other_input = self.driver.find_element(By.ID, other_input_id)
+                calculated_value = other_input.get_attribute("value")
+                logger.debug(f"Calculator: 1 {expensive_currency} = {calculated_value}")
+            except Exception:
+                logger.debug("Could not read calculated value (non-critical)")
+
             return True
 
-        except TimeoutException:
-            logger.warning(f"Calculator input #{input_id} not found")
+        except StaleElementReferenceException:
+            logger.warning("Input element became stale, page may have reloaded")
             return False
         except Exception as e:
             logger.warning(f"Error setting calculator input: {e}")
@@ -281,29 +483,65 @@ class SeleniumParser:
     def _load_page(self, url: str) -> bool:
         """Load page with retry logic. Returns True if successful."""
         try:
+            logger.debug(f"Loading URL: {url}")
             self.driver.get(url)
 
-            wait = WebDriverWait(self.driver, ELEMENT_TIMEOUT)
-            selectors = [
-                "[class*='Table_body__el__']",
-                "[class*='Table_body__amount']",
-                ".exchanger-row",
-            ]
+            # Wait a moment for initial JS execution
+            time.sleep(2)
 
-            for selector in selectors:
+            # Check for Cloudflare challenge
+            if self._check_cloudflare_challenge():
+                if not self._wait_for_cloudflare(timeout=45):
+                    logger.error("Failed to pass Cloudflare challenge")
+                    return False
+
+            # Wait for page to stabilize after potential redirects
+            time.sleep(1)
+
+            # Try to find table elements using shorter individual timeouts
+            # This prevents waiting full ELEMENT_TIMEOUT for each selector
+            per_selector_timeout = min(5.0, ELEMENT_TIMEOUT / len(self.TABLE_SELECTORS))
+
+            for selector in self.TABLE_SELECTORS:
                 try:
+                    wait = WebDriverWait(self.driver, per_selector_timeout)
                     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
                     logger.debug(f"Table loaded (selector: {selector})")
                     return True
                 except TimeoutException:
                     continue
+                except StaleElementReferenceException:
+                    # Page might be still loading, wait a bit and retry
+                    time.sleep(1)
+                    continue
+
+            # Save screenshot for debugging if table not found
+            self._save_debug_screenshot("table_not_found")
+
+            # Log page info for debugging
+            try:
+                page_title = self.driver.title
+                current_url = self.driver.current_url
+                logger.warning(f"Table not found. Title: '{page_title}', URL: {current_url}")
+
+                # Check if we're on an error page
+                page_source = self.driver.page_source.lower()
+                if '404' in page_source or 'not found' in page_source:
+                    logger.error("Page shows 404 error")
+                    return False
+                if 'error' in page_source[:500] or 'ошибка' in page_source[:500]:
+                    logger.warning("Page may contain error message")
+            except Exception as e:
+                logger.debug(f"Error getting page info: {e}")
 
             logger.warning("Table not found, will try to parse page as-is")
             return True
 
         except TimeoutException:
+            self._save_debug_screenshot("page_timeout")
             raise TimeoutException(f"Page load timeout: {url}")
         except WebDriverException as e:
+            self._save_debug_screenshot("webdriver_error")
             raise WebDriverException(f"WebDriver error: {e}")
 
     def _restart_browser(self):
@@ -356,6 +594,9 @@ class SeleniumParser:
         Returns:
             List of top exchange rates, or empty list on failure
         """
+        # Store current direction for screenshot naming
+        self._current_direction = f"{from_currency}_to_{to_currency}"
+
         # Check if we need to restart browser to prevent memory leaks
         self._check_restart_needed()
         self._init_driver()
@@ -365,10 +606,19 @@ class SeleniumParser:
         logger.debug(f"URL: {url}")
 
         # Try to load page with retries
+        page_loaded = False
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                self._load_page(url)
-                break
+                if self._load_page(url):
+                    page_loaded = True
+                    break
+                else:
+                    # _load_page returned False (e.g., Cloudflare challenge failed)
+                    if attempt < MAX_RETRIES:
+                        logger.warning(f"Page load returned False, retrying...")
+                        self._restart_browser()
+                        time.sleep(RETRY_DELAY)
+                    continue
             except Exception as e:
                 error_msg = str(e)
                 # Check if this is a connection error that requires browser restart
@@ -382,9 +632,15 @@ class SeleniumParser:
                     time.sleep(delay)
                 else:
                     logger.error(f"Failed to load page after {MAX_RETRIES} attempts: {url}")
+                    self._save_debug_screenshot("page_load_failed")
                     return []
 
+        if not page_loaded:
+            logger.error(f"Page load unsuccessful after {MAX_RETRIES} attempts: {url}")
+            return []
+
         # Set calculator input (with retry)
+        # Try a shorter retry loop with page refresh on failure
         calculator_success = False
         for attempt in range(1, MAX_RETRIES + 1):
             if self._set_calculator_input(from_currency, to_currency):
@@ -393,11 +649,21 @@ class SeleniumParser:
             if attempt < MAX_RETRIES:
                 delay = RETRY_DELAY * (2 ** (attempt - 1))
                 logger.warning(f"Calculator input attempt {attempt}/{MAX_RETRIES} failed. Retrying in {delay}s...")
+
+                # Try refreshing the page on calculator failure
+                try:
+                    logger.debug("Refreshing page to retry calculator...")
+                    self.driver.refresh()
+                    time.sleep(3)  # Wait for page to reload
+                except Exception as e:
+                    logger.debug(f"Page refresh failed: {e}")
+
                 time.sleep(delay)
 
         if not calculator_success:
             logger.error(f"Failed to set calculator input after {MAX_RETRIES} attempts")
-            return []
+            # Don't return empty - try to parse without calculator
+            logger.warning("Attempting to parse page without calculator adjustment...")
 
         # Click sorting header to get best rates first (optional retry)
         self._click_sort_header(from_currency, to_currency)
@@ -409,6 +675,7 @@ class SeleniumParser:
 
         if not rates:
             logger.error(f"No exchangers found for {from_currency} -> {to_currency}")
+            self._save_debug_screenshot("no_exchangers_found")
             return []
 
         # Get top rates (sorted by price)
@@ -431,25 +698,94 @@ class SeleniumParser:
         soup = BeautifulSoup(html, 'html.parser')
         rates = []
 
-        exchanger_rows = soup.find_all('div', class_=re.compile(r'Table_body__el__'))
-        logger.debug(f"Found {len(exchanger_rows)} exchanger rows")
+        # Try multiple selectors for exchanger rows
+        row_patterns = [
+            r'Table_body__el__',
+            r'exchanger',
+            r'Exchanger',
+            r'body__el',
+            r'rate-row',
+            r'exchange-row',
+        ]
+
+        exchanger_rows = []
+        for pattern in row_patterns:
+            exchanger_rows = soup.find_all('div', class_=re.compile(pattern))
+            if exchanger_rows:
+                logger.debug(f"Found {len(exchanger_rows)} rows with pattern '{pattern}'")
+                break
+
+        if not exchanger_rows:
+            # Last resort: try finding any div with specific child structure
+            logger.warning("No exchanger rows found with standard patterns, trying fallback...")
+            # Look for divs that contain both name and amount elements
+            all_divs = soup.find_all('div')
+            for div in all_divs:
+                if div.find('p') and len(div.find_all('div')) >= 2:
+                    # Could be an exchanger row
+                    exchanger_rows.append(div)
+            logger.debug(f"Fallback found {len(exchanger_rows)} potential rows")
+
+        logger.debug(f"Total exchanger rows to process: {len(exchanger_rows)}")
 
         for idx, row in enumerate(exchanger_rows):
             try:
-                # Get exchanger name
-                name_elem = row.find('p', class_=re.compile(r'Table_body__el__name'))
-                name = name_elem.get_text(strip=True) if name_elem else row.get('id', '')
+                # Get exchanger name using multiple patterns
+                name = None
+                name_patterns = [
+                    r'Table_body__el__name',
+                    r'exchanger.*name',
+                    r'name',
+                ]
+
+                for pattern in name_patterns:
+                    name_elem = row.find('p', class_=re.compile(pattern, re.IGNORECASE))
+                    if name_elem:
+                        name = name_elem.get_text(strip=True)
+                        break
+
+                # Fallback: try first <p> or <span> with text
+                if not name:
+                    for tag in ['p', 'span', 'a']:
+                        elem = row.find(tag)
+                        if elem and elem.get_text(strip=True):
+                            name = elem.get_text(strip=True)
+                            break
 
                 if not name:
+                    name = row.get('id', '')
+
+                if not name or len(name) < 2:
                     continue
 
-                # Find amount elements
-                amount_elems = row.find_all('div', class_=re.compile(r'Table_body__amount'))
+                # Find amount elements using multiple patterns
+                amount_patterns = [
+                    r'Table_body__amount',
+                    r'amount',
+                    r'value',
+                    r'price',
+                ]
+
+                amount_elems = []
+                for pattern in amount_patterns:
+                    amount_elems = row.find_all('div', class_=re.compile(pattern, re.IGNORECASE))
+                    if len(amount_elems) >= 2:
+                        break
+
                 if len(amount_elems) < 2:
-                    continue
+                    # Fallback: look for elements containing numeric text
+                    potential_amounts = []
+                    for elem in row.find_all(['p', 'span', 'div']):
+                        text = elem.get_text(strip=True)
+                        if text and parse_amount(text) is not None:
+                            potential_amounts.append(elem)
+                    if len(potential_amounts) >= 2:
+                        amount_elems = [potential_amounts[0].parent, potential_amounts[1].parent]
+                    else:
+                        continue
 
-                give_p = amount_elems[0].find('p')
-                receive_p = amount_elems[1].find('p')
+                give_p = amount_elems[0].find('p') or amount_elems[0]
+                receive_p = amount_elems[1].find('p') or amount_elems[1]
 
                 if not give_p or not receive_p:
                     continue
@@ -481,22 +817,34 @@ class SeleniumParser:
 
                 logger.debug(f"Parsed: {name} | price={price:.4f} RUB (buying={buying})")
 
-                # Parse limits
+                # Parse limits using multiple patterns
                 min_amount = None
                 max_amount = None
 
-                limit_elems = row.find_all('div', class_=re.compile(r'Table_body__change__el'))
+                limit_patterns = [
+                    r'Table_body__change__el',
+                    r'limit',
+                    r'range',
+                    r'min.*max',
+                ]
+
+                limit_elems = []
+                for pattern in limit_patterns:
+                    limit_elems = row.find_all('div', class_=re.compile(pattern, re.IGNORECASE))
+                    if limit_elems:
+                        break
+
                 for limit_elem in limit_elems:
-                    label = limit_elem.find('p')
-                    value = limit_elem.find('span')
+                    label = limit_elem.find('p') or limit_elem.find('span')
+                    value = limit_elem.find('span') if label and label.name == 'p' else limit_elem.find('p')
 
                     if label and value:
                         label_text = label.get_text(strip=True).lower()
                         value_amount = parse_amount(value.get_text())
 
-                        if label_text in ['от', 'ot', 'from', 'min']:
+                        if any(kw in label_text for kw in ['от', 'ot', 'from', 'min', 'мин']):
                             min_amount = value_amount
-                        elif label_text in ['до', 'do', 'to', 'max']:
+                        elif any(kw in label_text for kw in ['до', 'do', 'to', 'max', 'макс']):
                             max_amount = value_amount
 
                 exchange_rate = ExchangeRate(
