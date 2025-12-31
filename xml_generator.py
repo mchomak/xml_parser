@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 XML Generator for exchange rates
 """

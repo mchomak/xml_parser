@@ -2,7 +2,9 @@
 Selenium parser for cryptocurrency exchange rates from exnode.ru
 Used when the site renders content via JavaScript
 """
+from __future__ import annotations
 
+import gc
 import os
 import re
 import logging
@@ -29,6 +31,11 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Restart browser every N requests to prevent memory leaks
+BROWSER_RESTART_INTERVAL = int(os.getenv('BROWSER_RESTART_INTERVAL', '10'))
+logger.info(f"Browser will restart every {BROWSER_RESTART_INTERVAL} requests")
 
 
 def retry_on_failure(max_retries: int = None, delay: float = None):
@@ -118,6 +125,7 @@ class SeleniumParser:
         self.headless = headless
         self.driver: Optional[webdriver.Chrome] = None
         self._driver_pid: Optional[int] = None
+        self._request_count = 0  # Counter for auto-restart
 
     @retry_on_failure()
     def _init_driver(self):
@@ -145,6 +153,19 @@ class SeleniumParser:
         options.add_argument("--window-size=1920,1080")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--single-process")
+
+        # Memory management flags to prevent leaks
+        options.add_argument("--disable-cache")
+        options.add_argument("--disable-application-cache")
+        options.add_argument("--disable-offline-load-stale-cache")
+        options.add_argument("--disk-cache-size=0")
+        options.add_argument("--media-cache-size=0")
+        options.add_argument("--aggressive-cache-discard")
+        options.add_argument("--disable-background-networking")
+        options.add_argument("--disable-default-apps")
+        options.add_argument("--disable-sync")
+        options.add_argument("--js-flags=--expose-gc")
+
         options.add_argument(
             "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -158,6 +179,7 @@ class SeleniumParser:
 
         self.driver = webdriver.Chrome(options=options)
         self.driver.set_page_load_timeout(PAGE_TIMEOUT)
+        self._request_count = 0  # Reset counter on new driver
         logger.info("WebDriver initialized")
 
     def close(self):
@@ -298,6 +320,31 @@ class SeleniumParser:
         self._init_driver()
         logger.info("Browser restarted successfully")
 
+    def _cleanup_memory(self):
+        """Clean up browser memory to prevent leaks."""
+        if not self.driver:
+            return
+        try:
+            # Clear cookies and storage
+            self.driver.delete_all_cookies()
+            self.driver.execute_script("window.localStorage.clear();")
+            self.driver.execute_script("window.sessionStorage.clear();")
+            # Trigger JavaScript garbage collection if exposed
+            self.driver.execute_script("if(window.gc) window.gc();")
+            # Python garbage collection
+            gc.collect()
+            logger.debug("Memory cleanup completed")
+        except Exception as e:
+            logger.debug(f"Memory cleanup error (non-critical): {e}")
+
+    def _check_restart_needed(self):
+        """Check if browser needs restart due to too many requests."""
+        self._request_count += 1
+        if self._request_count >= BROWSER_RESTART_INTERVAL:
+            logger.info(f"Browser restart scheduled after {self._request_count} requests")
+            self._restart_browser()
+            gc.collect()
+
     def fetch_exchange_rates(self, from_currency: str, to_currency: str) -> list[ExchangeRate]:
         """
         Fetch exchange rates using Selenium with retry logic.
@@ -309,6 +356,8 @@ class SeleniumParser:
         Returns:
             List of top exchange rates, or empty list on failure
         """
+        # Check if we need to restart browser to prevent memory leaks
+        self._check_restart_needed()
         self._init_driver()
 
         url = build_exchange_url(from_currency, to_currency)
@@ -369,6 +418,9 @@ class SeleniumParser:
         logger.info(f"Found {len(top_rates)} top exchangers for {from_currency} -> {to_currency}")
         for i, r in enumerate(top_rates, 1):
             logger.info(f"  {i}. {r.exchanger_name}: price={r.price:.4f} RUB")
+
+        # Cleanup after each request to prevent memory buildup
+        self._cleanup_memory()
 
         return top_rates
 

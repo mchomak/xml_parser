@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Parser for cryptocurrency exchange rates from exnode.ru
 """
